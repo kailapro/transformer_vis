@@ -33,15 +33,17 @@ def _generate_html(
     can_expand = total_layers > initial_layers
 
     # Calculate dimensions - flow is bottom to top
-    layer_height = 230  # Increased to match actual layer content consumption
-    header_height = 180  # Space for logits at top
-    footer_height = 120  # Space for tokens/embed at bottom
+    layer_height = 280  # Increased to accommodate LayerNorm blocks
+    header_height = 220  # Space for logits + final LN at top
+    footer_height = 160  # Space for tokens/embed + pos embed at bottom
 
     # Layout constants - blocks on LEFT, residual on RIGHT
-    residual_x = 420  # Residual stream x position (right side)
+    residual_x = 450  # Residual stream x position (right side) - moved right for LN
     block_center_x = 200  # Center of blocks (left side)
     block_width = 200
     block_height = 40
+    ln_width = 40  # LayerNorm block width
+    ln_height = 25  # LayerNorm block height
     head_size = 50
     head_gap = 8
     add_circle_radius = 14
@@ -136,6 +138,19 @@ def _generate_html(
       dominant-baseline: central;
       font-family: 'Times New Roman', serif;
     }}
+    #{viz_id} .ln-block {{
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }}
+    #{viz_id} .ln-block:hover {{
+      filter: brightness(0.95);
+    }}
+    #{viz_id} .ln-label {{
+      font-size: 11px;
+      fill: {text_color};
+      pointer-events: none;
+      font-family: 'Times New Roman', serif;
+    }}
     #{viz_id} .attention-expanded {{
       display: none;
       position: absolute;
@@ -212,6 +227,32 @@ def _generate_html(
     #{viz_id} .residual-expanded.visible {{
       display: block;
     }}
+    #{viz_id} .ln-expanded {{
+      display: none;
+      position: absolute;
+      background: white;
+      border: 1px solid {block_border};
+      border-radius: 4px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      z-index: 100;
+    }}
+    #{viz_id} .ln-expanded.visible {{
+      display: block;
+    }}
+    #{viz_id} .pos-embed-expanded {{
+      display: none;
+      position: absolute;
+      background: white;
+      border: 1px solid {block_border};
+      border-radius: 4px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      z-index: 100;
+    }}
+    #{viz_id} .pos-embed-expanded.visible {{
+      display: block;
+    }}
     #{viz_id} .residual-hover {{
       cursor: pointer;
     }}
@@ -224,6 +265,58 @@ def _generate_html(
     #{viz_id} .expand-btn:hover rect {{
       fill: #d0c0a0;
     }}
+    #{viz_id} .layer-box {{
+      fill: none;
+      stroke: #ddd;
+      stroke-width: 1;
+      stroke-dasharray: 4,4;
+      rx: 8;
+    }}
+    #{viz_id} .layer-label-bg {{
+      font-size: 11px;
+      fill: #999;
+      font-family: 'Times New Roman', serif;
+    }}
+    #{viz_id} .internal-diagram {{
+      margin-top: 10px;
+      padding: 10px;
+      background: #fafafa;
+      border-radius: 4px;
+      border: 1px solid #e0e0e0;
+    }}
+    #{viz_id} .internal-flow {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      font-family: 'Times New Roman', serif;
+    }}
+    #{viz_id} .internal-box {{
+      padding: 6px 10px;
+      background: #E8D5B7;
+      border: 1px solid #C4A77D;
+      border-radius: 4px;
+      font-size: 11px;
+    }}
+    #{viz_id} .internal-op {{
+      padding: 4px 8px;
+      background: #e8e8e8;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 11px;
+      font-style: italic;
+    }}
+    #{viz_id} .internal-arrow {{
+      color: #888;
+    }}
+    #{viz_id} .dim-info {{
+      font-size: 10px;
+      color: #888;
+      text-align: center;
+      margin-top: 2px;
+    }}
   </style>
 
   <div id="{viz_id}-svg-container">
@@ -234,22 +327,72 @@ def _generate_html(
     for layer_idx in range(total_layers):
         html_template += f'''
   <div id="{viz_id}-attn-expanded-{layer_idx}" class="attention-expanded">
-    <div class="expanded-title">Layer {layer_idx} Attention Heads</div>
-    <div class="head-grid">
+    <div class="expanded-title">Layer {layer_idx} Attention ({arch.attn_type.replace('-', ' ').title()})</div>
+    <div class="expanded-dims">
+      {arch.n_heads} heads{f' ({arch.n_key_value_heads} KV heads)' if arch.n_key_value_heads and arch.n_key_value_heads != arch.n_heads else ''} × d_head={arch.d_head}
+      {f'<br><em>+ RoPE</em>' if arch.pos_embed_type == 'rotary' else ''}
+    </div>
+    <div class="internal-diagram">
+      <div class="internal-flow">
+        <span class="internal-box">x</span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">W<sub>Q</sub>, W<sub>K</sub>, W<sub>V</sub></span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">Q, K, V</span>
+        {f'<span class="internal-arrow">→</span><span class="internal-op">RoPE</span>' if arch.pos_embed_type == 'rotary' else ''}
+      </div>
+      <div class="dim-info">[{arch.d_model}] → [{arch.n_heads}×{arch.d_head}]</div>
+      <div class="internal-flow" style="margin-top: 8px;">
+        <span class="internal-op">QK<sup>T</sup>/√d</span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-op">softmax</span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">A</span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-op">A·V</span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">W<sub>O</sub></span>
+      </div>
+      <div class="dim-info">[{arch.n_heads}×{arch.d_head}] → [{arch.d_model}]</div>
+    </div>
+    <div class="head-grid" style="margin-top: 10px;">
 '''
         for h in range(arch.n_heads):
             html_template += f'''      <div class="attention-head">h<sub>{h}</sub></div>
 '''
         html_template += f'''    </div>
-    <div class="expanded-dims">
-      {arch.n_heads} heads × d_head={arch.d_head}
-    </div>
   </div>
 
   <div id="{viz_id}-mlp-expanded-{layer_idx}" class="mlp-expanded">
-    <div class="expanded-title">Layer {layer_idx} MLP</div>
+    <div class="expanded-title">Layer {layer_idx} MLP{' (Gated)' if arch.mlp_type == 'gated' else ''}</div>
     <div class="expanded-dims">
       {arch.d_model} → {arch.d_mlp} → {arch.d_model}
+    </div>
+    <div class="internal-diagram">
+      <div class="internal-flow">
+        <span class="internal-box">x</span>
+        <span class="internal-arrow">→</span>
+        {'<span class="internal-box">W<sub>gate</sub>, W<sub>up</sub></span><span class="internal-arrow">→</span><span class="internal-op">' + arch.activation.upper() + ' ⊙</span>' if arch.mlp_type == 'gated' else '<span class="internal-box">W<sub>in</sub></span><span class="internal-arrow">→</span><span class="internal-op">' + arch.activation.upper() + '</span>'}
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">W<sub>{'down' if arch.mlp_type == 'gated' else 'out'}</sub></span>
+        <span class="internal-arrow">→</span>
+        <span class="internal-box">y</span>
+      </div>
+      <div class="dim-info">[{arch.d_model}] → [{arch.d_mlp}] → [{arch.d_model}]</div>
+    </div>
+  </div>
+
+  <div id="{viz_id}-ln-attn-expanded-{layer_idx}" class="ln-expanded">
+    <div class="expanded-title">Layer {layer_idx} Pre-Attention LayerNorm</div>
+    <div class="expanded-dims">
+      Normalizes to d_model = {arch.d_model}
+    </div>
+  </div>
+
+  <div id="{viz_id}-ln-mlp-expanded-{layer_idx}" class="ln-expanded">
+    <div class="expanded-title">Layer {layer_idx} Pre-MLP LayerNorm</div>
+    <div class="expanded-dims">
+      Normalizes to d_model = {arch.d_model}
     </div>
   </div>
 '''
@@ -260,6 +403,20 @@ def _generate_html(
     <div class="expanded-title">Residual Stream</div>
     <div class="expanded-dims">
       d_model = {arch.d_model}
+    </div>
+  </div>
+
+  <div id="{viz_id}-ln-final-expanded" class="ln-expanded">
+    <div class="expanded-title">Final LayerNorm</div>
+    <div class="expanded-dims">
+      Normalizes to d_model = {arch.d_model}
+    </div>
+  </div>
+
+  <div id="{viz_id}-pos-embed-expanded" class="pos-embed-expanded">
+    <div class="expanded-title">Positional Embedding ({arch.pos_embed_type.title()})</div>
+    <div class="expanded-dims">
+      {f'n_ctx = {arch.n_ctx} × d_model = {arch.d_model}' if arch.pos_embed_type == 'learned' else f'Applied in attention (RoPE)' if arch.pos_embed_type == 'rotary' else f'Type: {arch.pos_embed_type}'}
     </div>
   </div>
 '''
@@ -295,7 +452,12 @@ def _generate_html(
     dHead: {arch.d_head},
     dMlp: {arch.d_mlp},
     dVocab: {arch.d_vocab},
-    dVocabOut: {arch.d_vocab_out or arch.d_vocab}
+    dVocabOut: {arch.d_vocab_out or arch.d_vocab},
+    hasPosEmbed: {str(arch.has_positional_embedding).lower()},
+    posEmbedType: '{arch.pos_embed_type}',
+    activation: '{arch.activation}',
+    mlpType: '{arch.mlp_type}',
+    attnType: '{arch.attn_type}'
   }};
 
   let isExpanded = false;
@@ -317,10 +479,11 @@ def _generate_html(
     // Calculate Y positions (bottom to top, so we start from totalHeight)
     let currentY = totalHeight - footerHeight;
 
-    // === BOTTOM: Tokens and Embed (aligned with residual stream) ===
+    // === BOTTOM: Tokens, Embed, and Positional Embedding ===
     const tokensY = totalHeight - 40;
-    const embedY = totalHeight - 90;
-    const embedOutY = embedY - blockHeight/2 - 15;
+    const embedY = totalHeight - 95;
+    const posEmbedAddY = embedY - blockHeight/2 - 30;  // Where pos embed is added
+    const embedOutY = posEmbedAddY - 20;
 
     // Tokens block (centered on residual stream)
     svg += `
@@ -351,12 +514,54 @@ def _generate_html(
       </g>
     `;
 
-    // Arrow from embed going up (straight into residual stream)
-    svg += `
-      <line x1="${{residualX}}" y1="${{embedY - blockHeight/2}}"
-            x2="${{residualX}}" y2="${{embedOutY}}"
-            class="flow-arrow" />
-    `;
+    // Positional embedding block (only for models with learned positional embeddings)
+    const posEmbedX = blockCenterX;
+    if (archInfo.hasPosEmbed) {{
+      // Arrow from embed up to + circle
+      svg += `
+        <line x1="${{residualX}}" y1="${{embedY - blockHeight/2}}"
+              x2="${{residualX}}" y2="${{posEmbedAddY + addCircleRadius + 2}}"
+              class="flow-line" />
+      `;
+      svg += `
+        <g class="block"
+           onmouseenter="showPanel('${{vizId}}', 'pos-embed-expanded', this)"
+           onmouseleave="hidePanel('${{vizId}}', 'pos-embed-expanded')">
+          <rect x="${{posEmbedX - 70}}" y="${{posEmbedAddY - 15}}"
+                width="140" height="30"
+                rx="4" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
+          <text x="${{posEmbedX}}" y="${{posEmbedAddY + 4}}"
+                text-anchor="middle" class="block-label">pos_embed</text>
+        </g>
+      `;
+
+      // Arrow from pos_embed to + circle
+      svg += `
+        <line x1="${{posEmbedX + 70}}" y1="${{posEmbedAddY}}"
+              x2="${{residualX - addCircleRadius - 2}}" y2="${{posEmbedAddY}}"
+              class="flow-line" />
+      `;
+
+      // + circle for positional embedding addition
+      svg += `
+        <circle cx="${{residualX}}" cy="${{posEmbedAddY}}" r="${{addCircleRadius}}" class="add-circle" />
+        <text x="${{residualX}}" y="${{posEmbedAddY}}" class="add-symbol">+</text>
+      `;
+
+      // Arrow from + circle up to residual stream start
+      svg += `
+        <line x1="${{residualX}}" y1="${{posEmbedAddY - addCircleRadius}}"
+              x2="${{residualX}}" y2="${{embedOutY}}"
+              class="flow-arrow" />
+      `;
+    }} else {{
+      // For RoPE/ALiBi models: direct arrow from embed to residual stream
+      svg += `
+        <line x1="${{residualX}}" y1="${{embedY - blockHeight/2}}"
+              x2="${{residualX}}" y2="${{embedOutY}}"
+              class="flow-arrow" />
+      `;
+    }}
 
     // x_0 label
     svg += `
@@ -369,7 +574,7 @@ def _generate_html(
 
     svg += `
       <g class="residual-hover"
-         onmouseenter="showResidual('${{vizId}}', this)"
+         onmousemove="showResidual('${{vizId}}', event)"
          onmouseleave="hideResidual('${{vizId}}')">
         <line x1="${{residualX}}" y1="${{residualStartY}}" x2="${{residualX}}" y2="${{residualEndY}}"
               stroke="transparent" stroke-width="20" />
@@ -384,11 +589,19 @@ def _generate_html(
     // Current position moving up from bottom
     currentY = embedOutY - 40;
 
+    // LayerNorm dimensions
+    const lnWidth = 40;
+    const lnHeight = 25;
+
     // === LAYERS (bottom to top) ===
     for (let layerIdx = 0; layerIdx < numLayers; layerIdx++) {{
 
-      // === ATTENTION HEADS ===
-      const headsY = currentY - 70;
+      // Calculate layer box dimensions first
+      const layerBoxPadding = 15;
+      const layerBoxBottom = currentY + 10;  // Bottom of this layer's box
+
+      // === PRE-ATTENTION LAYERNORM + ATTENTION HEADS ===
+      const headsY = currentY - 90;  // Moved up to make room for LN
 
       // Calculate heads layout - show h0, h1, ..., h(n-1)
       const showFirstHeads = 2;  // Show h0, h1
@@ -399,18 +612,49 @@ def _generate_html(
       const headsEndX = headsStartX + totalHeadsWidth;
 
       // Y positions for this attention section
-      const attnInputY = headsY + headSize + 25;  // Where arrow comes from residual
+      const lnAttnY = headsY + headSize + 45;  // LN position
+      const attnInputY = headsY + headSize + 15;  // Where horizontal line to heads is
       const attnOutputY = headsY - 20;  // Where arrows go up to
       const attnAddY = attnOutputY;  // Where + circle is
 
       addCircles.push({{ x: residualX, y: attnAddY }});
 
-      // Arrow from residual: down then left - horizontal line spans all heads
+      // Arrow from residual down to LN level
       svg += `
-        <line x1="${{residualX}}" y1="${{attnInputY + 25}}"
-              x2="${{residualX}}" y2="${{attnInputY}}"
+        <line x1="${{residualX}}" y1="${{lnAttnY + 25}}"
+              x2="${{residualX}}" y2="${{lnAttnY}}"
               class="flow-line" />
-        <line x1="${{residualX}}" y1="${{attnInputY}}"
+      `;
+
+      // LN position (between residual and heads)
+      const lnAttnX = residualX - 60;
+
+      // Arrow from residual to LN
+      svg += `
+        <line x1="${{residualX}}" y1="${{lnAttnY}}"
+              x2="${{lnAttnX + lnWidth/2 + 2}}" y2="${{lnAttnY}}"
+              class="flow-arrow" />
+      `;
+
+      // Pre-attention LayerNorm block
+      svg += `
+        <g class="ln-block"
+           onmouseenter="showExpanded('${{vizId}}', 'ln-attn', ${{layerIdx}}, this)"
+           onmouseleave="hideExpanded('${{vizId}}', 'ln-attn', ${{layerIdx}})">
+          <rect x="${{lnAttnX - lnWidth/2}}" y="${{lnAttnY - lnHeight/2}}"
+                width="${{lnWidth}}" height="${{lnHeight}}"
+                rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+          <text x="${{lnAttnX}}" y="${{lnAttnY + 4}}"
+                text-anchor="middle" class="ln-label">LN</text>
+        </g>
+      `;
+
+      // Arrow from LN down to horizontal attention input line
+      svg += `
+        <line x1="${{lnAttnX}}" y1="${{lnAttnY - lnHeight/2}}"
+              x2="${{lnAttnX}}" y2="${{attnInputY}}"
+              class="flow-line" />
+        <line x1="${{lnAttnX}}" y1="${{attnInputY}}"
               x2="${{headsStartX + headSize/2}}" y2="${{attnInputY}}"
               class="flow-line" />
       `;
@@ -496,26 +740,52 @@ def _generate_html(
 
       currentY = attnAddY - 25;
 
-      // === MLP ===
+      // === PRE-MLP LAYERNORM + MLP ===
       if (hasMLP) {{
-        const mlpY = currentY - 70;  // Increased gap to give room for input arrow
+        const mlpY = currentY - 90;  // Increased gap to accommodate LN
         const mlpOutputY = mlpY - 20;
         const mlpAddY = mlpOutputY;
 
         addCircles.push({{ x: residualX, y: mlpAddY }});
 
-        // Arrow from residual to MLP (matching attention pattern):
-        // 1. Branch from residual above + circle
-        // 2. Go UP to mlpInputY (below MLP box)
-        // 3. Go LEFT horizontally
-        // 4. Arrow goes UP into MLP from below
-        const mlpInputY = mlpY + blockHeight + 20;  // 20px below MLP box
-        const mlpBranchY = mlpInputY + 20;  // 20px below the horizontal line
+        // LN position for MLP
+        const lnMlpY = mlpY + blockHeight + 45;
+        const lnMlpX = residualX - 60;
+
+        // Arrow from residual down to LN level
         svg += `
-          <line x1="${{residualX}}" y1="${{mlpBranchY}}"
-                x2="${{residualX}}" y2="${{mlpInputY}}"
+          <line x1="${{residualX}}" y1="${{lnMlpY + 25}}"
+                x2="${{residualX}}" y2="${{lnMlpY}}"
                 class="flow-line" />
-          <line x1="${{residualX}}" y1="${{mlpInputY}}"
+        `;
+
+        // Arrow from residual to LN
+        svg += `
+          <line x1="${{residualX}}" y1="${{lnMlpY}}"
+                x2="${{lnMlpX + lnWidth/2 + 2}}" y2="${{lnMlpY}}"
+                class="flow-arrow" />
+        `;
+
+        // Pre-MLP LayerNorm block
+        svg += `
+          <g class="ln-block"
+             onmouseenter="showExpanded('${{vizId}}', 'ln-mlp', ${{layerIdx}}, this)"
+             onmouseleave="hideExpanded('${{vizId}}', 'ln-mlp', ${{layerIdx}})">
+            <rect x="${{lnMlpX - lnWidth/2}}" y="${{lnMlpY - lnHeight/2}}"
+                  width="${{lnWidth}}" height="${{lnHeight}}"
+                  rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+            <text x="${{lnMlpX}}" y="${{lnMlpY + 4}}"
+                  text-anchor="middle" class="ln-label">LN</text>
+          </g>
+        `;
+
+        // Arrow from LN up to MLP
+        const mlpInputY = mlpY + blockHeight + 15;
+        svg += `
+          <line x1="${{lnMlpX}}" y1="${{lnMlpY - lnHeight/2}}"
+                x2="${{lnMlpX}}" y2="${{mlpInputY}}"
+                class="flow-line" />
+          <line x1="${{lnMlpX}}" y1="${{mlpInputY}}"
                 x2="${{blockCenterX}}" y2="${{mlpInputY}}"
                 class="flow-line" />
           <line x1="${{blockCenterX}}" y1="${{mlpInputY}}"
@@ -557,6 +827,21 @@ def _generate_html(
       }} else {{
         currentY = attnAddY - 25;
       }}
+
+      // Draw layer box (dashed rectangle around the layer)
+      const layerBoxTop = currentY + 5;  // Top of this layer's box
+      const layerBoxLeft = 50;
+      const layerBoxRight = residualX + 80;
+      const layerBoxWidth = layerBoxRight - layerBoxLeft;
+      const layerBoxHeight = layerBoxBottom - layerBoxTop;
+
+      svg += `
+        <rect x="${{layerBoxLeft}}" y="${{layerBoxTop}}"
+              width="${{layerBoxWidth}}" height="${{layerBoxHeight}}"
+              class="layer-box" />
+        <text x="${{layerBoxLeft + 8}}" y="${{layerBoxTop + 15}}"
+              class="layer-label-bg">Layer ${{layerIdx}}</text>
+      `;
     }}
 
     // Ellipsis / expand button (positioned between layers and unembed)
@@ -575,21 +860,42 @@ def _generate_html(
       currentY = expandBtnY - 20;
     }}
 
-    // === TOP: Unembed and Logits (aligned with residual stream) ===
+    // === TOP: Final LN, Unembed and Logits ===
     // Position based on currentY to avoid overlap
-    const unembedY = currentY - 60;
+    const finalLnY = currentY - 50;
+    const unembedY = finalLnY - 55;
     const logitsY = unembedY - 55;
 
-    // Continue residual stream line up to unembed level
+    // Continue residual stream line up to final LN level
     svg += `
       <line x1="${{residualX}}" y1="${{currentY}}"
-            x2="${{residualX}}" y2="${{unembedY + blockHeight/2 + 10}}"
+            x2="${{residualX}}" y2="${{finalLnY + lnHeight/2 + 5}}"
             class="residual-stream" />
     `;
 
     // x_-1 label (final residual state)
     svg += `
-      <text x="${{residualX + 15}}" y="${{unembedY + blockHeight/2 + 15}}" class="residual-label">x<tspan baseline-shift="sub" font-size="10">-1</tspan></text>
+      <text x="${{residualX + 15}}" y="${{finalLnY + lnHeight/2 + 10}}" class="residual-label">x<tspan baseline-shift="sub" font-size="10">-1</tspan></text>
+    `;
+
+    // Final LayerNorm block (centered on residual stream)
+    svg += `
+      <g class="ln-block"
+         onmouseenter="showPanel('${{vizId}}', 'ln-final-expanded', this)"
+         onmouseleave="hidePanel('${{vizId}}', 'ln-final-expanded')">
+        <rect x="${{residualX - lnWidth/2}}" y="${{finalLnY - lnHeight/2}}"
+              width="${{lnWidth}}" height="${{lnHeight}}"
+              rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+        <text x="${{residualX}}" y="${{finalLnY + 4}}"
+              text-anchor="middle" class="ln-label">LN</text>
+      </g>
+    `;
+
+    // Arrow from final LN to unembed
+    svg += `
+      <line x1="${{residualX}}" y1="${{finalLnY - lnHeight/2}}"
+            x2="${{residualX}}" y2="${{unembedY + blockHeight/2 + 2}}"
+            class="flow-arrow" />
     `;
 
     // Unembed block (centered on residual stream)
@@ -669,14 +975,13 @@ def _generate_html(
     }}
   }}
 
-  function showResidual(id, element) {{
+  function showResidual(id, event) {{
     if (id !== vizId) return;
     const panel = document.getElementById(id + '-residual-expanded');
     if (panel) {{
-      const rect = element.getBoundingClientRect();
       const container = document.getElementById(id).getBoundingClientRect();
-      panel.style.left = (rect.right - container.left + 10) + 'px';
-      panel.style.top = (rect.top - container.top + rect.height / 2 - 30) + 'px';
+      panel.style.left = (event.clientX - container.left + 15) + 'px';
+      panel.style.top = (event.clientY - container.top - 20) + 'px';
       panel.classList.add('visible');
     }}
   }}
@@ -689,11 +994,33 @@ def _generate_html(
     }}
   }}
 
+  function showPanel(id, panelId, element) {{
+    if (id !== vizId) return;
+    const panel = document.getElementById(id + '-' + panelId);
+    if (panel) {{
+      const rect = element.getBoundingClientRect();
+      const container = document.getElementById(id).getBoundingClientRect();
+      panel.style.left = (rect.right - container.left + 10) + 'px';
+      panel.style.top = (rect.top - container.top) + 'px';
+      panel.classList.add('visible');
+    }}
+  }}
+
+  function hidePanel(id, panelId) {{
+    if (id !== vizId) return;
+    const panel = document.getElementById(id + '-' + panelId);
+    if (panel) {{
+      panel.classList.remove('visible');
+    }}
+  }}
+
   window.showExpanded = showExpanded;
   window.hideExpanded = hideExpanded;
   window.toggleExpand = toggleExpand;
   window.showResidual = showResidual;
   window.hideResidual = hideResidual;
+  window.showPanel = showPanel;
+  window.hidePanel = hidePanel;
 
   render();
 }})();
