@@ -199,6 +199,25 @@ def _generate_html(
     #{viz_id} .mlp-expanded.visible {{
       display: block;
     }}
+    #{viz_id} .residual-expanded {{
+      display: none;
+      position: absolute;
+      background: white;
+      border: 1px solid {block_border};
+      border-radius: 4px;
+      padding: 12px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+      z-index: 100;
+    }}
+    #{viz_id} .residual-expanded.visible {{
+      display: block;
+    }}
+    #{viz_id} .residual-hover {{
+      cursor: pointer;
+    }}
+    #{viz_id} .residual-hover:hover .residual-stream {{
+      stroke-width: 2.5;
+    }}
     #{viz_id} .expand-btn {{
       cursor: pointer;
     }}
@@ -231,6 +250,16 @@ def _generate_html(
     <div class="expanded-title">Layer {layer_idx} MLP</div>
     <div class="expanded-dims">
       {arch.d_model} → {arch.d_mlp} → {arch.d_model}
+    </div>
+  </div>
+'''
+
+    # Add residual stream panel
+    html_template += f'''
+  <div id="{viz_id}-residual-expanded" class="residual-expanded">
+    <div class="expanded-title">Residual Stream</div>
+    <div class="expanded-dims">
+      d_model = {arch.d_model}
     </div>
   </div>
 '''
@@ -339,8 +368,14 @@ def _generate_html(
     let residualEndY = headerHeight + 30;
 
     svg += `
-      <line x1="${{residualX}}" y1="${{residualStartY}}" x2="${{residualX}}" y2="${{residualEndY}}"
-            class="residual-stream" />
+      <g class="residual-hover"
+         onmouseenter="showResidual('${{vizId}}', this)"
+         onmouseleave="hideResidual('${{vizId}}')">
+        <line x1="${{residualX}}" y1="${{residualStartY}}" x2="${{residualX}}" y2="${{residualEndY}}"
+              stroke="transparent" stroke-width="20" />
+        <line x1="${{residualX}}" y1="${{residualStartY}}" x2="${{residualX}}" y2="${{residualEndY}}"
+              class="residual-stream" />
+      </g>
     `;
 
     // Track + circle positions
@@ -634,9 +669,31 @@ def _generate_html(
     }}
   }}
 
+  function showResidual(id, element) {{
+    if (id !== vizId) return;
+    const panel = document.getElementById(id + '-residual-expanded');
+    if (panel) {{
+      const rect = element.getBoundingClientRect();
+      const container = document.getElementById(id).getBoundingClientRect();
+      panel.style.left = (rect.right - container.left + 10) + 'px';
+      panel.style.top = (rect.top - container.top + rect.height / 2 - 30) + 'px';
+      panel.classList.add('visible');
+    }}
+  }}
+
+  function hideResidual(id) {{
+    if (id !== vizId) return;
+    const panel = document.getElementById(id + '-residual-expanded');
+    if (panel) {{
+      panel.classList.remove('visible');
+    }}
+  }}
+
   window.showExpanded = showExpanded;
   window.hideExpanded = hideExpanded;
   window.toggleExpand = toggleExpand;
+  window.showResidual = showResidual;
+  window.hideResidual = hideResidual;
 
   render();
 }})();
