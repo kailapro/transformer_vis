@@ -17,6 +17,9 @@ Static image usage:
 # Interactive visualization (primary API)
 from .interactive import InteractiveTransformerViz, visualize
 
+# Hook parsing utilities
+from .hook_parser import ParsedHook, parse_hook, process_hooks
+
 # Static visualization (matplotlib-based)
 from .visualizer import TransformerVisualizer
 from .components import (
@@ -34,6 +37,10 @@ __all__ = [
     # Primary interactive API
     "visualize",
     "InteractiveTransformerViz",
+    # Hook parsing utilities
+    "ParsedHook",
+    "parse_hook",
+    "process_hooks",
     # Static visualization
     "TransformerVisualizer",
     # Components

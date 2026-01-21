@@ -10,6 +10,7 @@ An interactive visualization library for transformer model architectures, compat
 - Bottom-to-top data flow matching standard transformer circuit diagrams
 - Shows individual attention heads (h₀, h₁, ..., hₙ₋₁)
 - Residual stream with addition points clearly marked
+- **Hook visualization**: Highlight components with TransformerLens hooks attached, with support for head-specific highlighting
 
 ## Installation
 
@@ -178,6 +179,76 @@ viz = visualize("gpt2", max_layers=4)
 viz.save_html("gpt2_architecture.html")
 ```
 
+## Hook Visualization
+
+Visualize which components have TransformerLens hooks attached by highlighting them in the diagram with a color-coded legend.
+
+### Basic Hook Visualization
+
+```python
+from transformer_viz import visualize
+
+def my_hook(tensor, hook):
+    # Your hook logic here
+    return tensor
+
+def ablation_hook(tensor, hook):
+    return tensor * 0
+
+# Pass hooks as a list of (hook_name, hook_function) tuples
+viz = visualize('gpt2-small', hooks=[
+    ('blocks.1.attn.hook_pattern', my_hook),
+    ('blocks.2.mlp.hook_post', ablation_hook),
+])
+```
+
+The hook names follow TransformerLens conventions (see [TransformerLens documentation](https://neelnanda-io.github.io/TransformerLens/generated/code/transformer_lens.hook_points.html) for details). Common hook points include:
+- `hook_pattern` - Attention pattern matrix after softmax, shape `[batch, n_heads, seq_q, seq_k]`
+- `hook_post` - MLP activations after the activation function
+- `hook_q`, `hook_k`, `hook_v` - Query, key, value vectors
+- `hook_result` - Attention output before projection
+
+This will:
+- Highlight Layer 1 attention in one color
+- Highlight Layer 2 MLP in another color
+- Display a legend mapping colors to function names
+
+### Head-Specific Highlighting
+
+For attention hooks, you can specify which heads to highlight. This is useful when your hook only modifies specific attention heads:
+
+```python
+def head_ablation(tensor, hook):
+    # Zero out only heads 0 and 2
+    tensor[:, [0, 2], :, :] = 0
+    return tensor
+
+# Highlight only heads 0 and 2 in layer 1
+viz = visualize('gpt2-small', hooks=[
+    ('blocks.1.attn.hook_pattern', head_ablation, {'heads': [0, 2]}),
+])
+```
+
+The third element of the tuple is an options dict with:
+- `heads`: List of head indices to highlight (omit to highlight all heads)
+
+### Supported Hook Points
+
+| Hook Pattern | Component Highlighted |
+|-------------|----------------------|
+| `blocks.{L}.attn.*` | Attention heads in layer L |
+| `blocks.{L}.mlp.*` | MLP block in layer L |
+| `blocks.{L}.ln1.*` | Pre-attention LayerNorm in layer L |
+| `blocks.{L}.ln2.*` | Pre-MLP LayerNorm in layer L |
+| `blocks.{L}.hook_resid_*` | Residual stream in layer L |
+| `hook_embed` | Embedding layer |
+| `hook_pos_embed` | Positional embedding |
+| `ln_final.*` | Final LayerNorm |
+
+### Viewing Hooked Heads
+
+When you hover over an attention layer, the expanded panel shows all heads in a grid. Hooked heads are highlighted with their assigned color, making it easy to see which heads are affected even when the main diagram only shows h₀, h₁, ..., hₙ₋₁.
+
 ## Diagram Components
 
 The visualization shows:
@@ -193,7 +264,7 @@ The visualization shows:
 
 ## API Reference
 
-### `visualize(model_or_config, max_layers=None, width=600, config=None)`
+### `visualize(model_or_config, max_layers=None, width=600, config=None, hooks=None)`
 
 Quick function to visualize a transformer.
 
@@ -202,6 +273,9 @@ Quick function to visualize a transformer.
 - `max_layers`: Maximum layers to show initially (default: 8)
 - `width`: Width in pixels (default: 600)
 - `config`: Optional VisualizationConfig
+- `hooks`: Optional list of hook specifications to highlight. Each spec is either:
+  - `(hook_name, hook_function)` - highlights all heads for attention hooks
+  - `(hook_name, hook_function, {'heads': [...]})` - highlights specific heads
 
 **Returns:** InteractiveTransformerViz instance
 
@@ -214,7 +288,7 @@ Main visualization class.
 - `from_config(cfg)`: Load from TransformerLens config
 - `from_dict(config)`: Load from dictionary
 - `from_pretrained(model_name)`: Load from pretrained model name
-- `render(max_layers=None, width=600)`: Render the visualization
+- `render(max_layers=None, width=600, hooks=None)`: Render the visualization with optional hook highlighting
 - `show()`: Display in Jupyter notebook
 - `save_html(filepath)`: Save as standalone HTML file
 

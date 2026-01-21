@@ -8,11 +8,12 @@ styled after the Anthropic Transformer Circuits diagrams.
 import html
 import json
 import uuid
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple, Callable
 from dataclasses import dataclass
 
 from .model_adapter import ModelArchitecture, TransformerLensAdapter
 from .config import VisualizationConfig
+from .hook_parser import process_hooks
 
 
 def _generate_html(
@@ -22,6 +23,7 @@ def _generate_html(
     width: int = 600,
     height: Optional[int] = None,
     initially_collapsed: bool = True,
+    hooks: Optional[List[Tuple[str, Callable]]] = None,
 ) -> str:
     """Generate the interactive HTML/SVG visualization."""
 
@@ -317,9 +319,50 @@ def _generate_html(
       text-align: center;
       margin-top: 2px;
     }}
+    #{viz_id} .block.highlighted rect {{
+      stroke-width: 2;
+    }}
+    #{viz_id} .ln-block.highlighted rect {{
+      stroke-width: 2;
+    }}
+    #{viz_id} .hook-legend {{
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: white;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 8px 12px;
+      font-family: 'Times New Roman', serif;
+      font-size: 12px;
+      z-index: 50;
+    }}
+    #{viz_id} .legend-title {{
+      font-weight: bold;
+      margin-bottom: 6px;
+    }}
+    #{viz_id} .legend-item {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 4px 0;
+    }}
+    #{viz_id} .legend-color {{
+      width: 16px;
+      height: 16px;
+      border-radius: 3px;
+      border: 1px solid #aaa;
+    }}
+    #{viz_id} .legend-label {{
+      font-family: monospace;
+      font-size: 11px;
+    }}
   </style>
 
   <div id="{viz_id}-svg-container">
+  </div>
+  <div id="{viz_id}-legend" class="hook-legend" style="display: none;">
+    <div class="legend-title">Hooks</div>
   </div>
 '''
 
@@ -358,7 +401,7 @@ def _generate_html(
     <div class="head-grid" style="margin-top: 10px;">
 '''
         for h in range(arch.n_heads):
-            html_template += f'''      <div class="attention-head">h<sub>{h}</sub></div>
+            html_template += f'''      <div class="attention-head" data-layer="{layer_idx}" data-head="{h}">h<sub>{h}</sub></div>
 '''
         html_template += f'''    </div>
   </div>
@@ -459,6 +502,38 @@ def _generate_html(
     mlpType: '{arch.mlp_type}',
     attnType: '{arch.attn_type}'
   }};
+
+  const hookData = {json.dumps(process_hooks(hooks) if hooks else {'hooks': [], 'legend': []})};
+
+  // Helper function to get highlight color for a component (non-attention)
+  function getComponentColor(layerIdx, componentType, defaultColor) {{
+    const hook = hookData.hooks.find(h =>
+      h.layer === layerIdx && h.component === componentType);
+    return hook ? hook.color : defaultColor;
+  }}
+
+  // Helper to check if a component has a hook (non-attention)
+  function hasHook(layerIdx, componentType) {{
+    return hookData.hooks.some(h =>
+      h.layer === layerIdx && h.component === componentType);
+  }}
+
+  // Helper to get highlight color for a specific attention head
+  function getHeadColor(layerIdx, headIdx, defaultColor) {{
+    const hook = hookData.hooks.find(h =>
+      h.layer === layerIdx &&
+      h.component === 'attention' &&
+      (h.heads === null || h.heads.includes(headIdx)));
+    return hook ? hook.color : defaultColor;
+  }}
+
+  // Helper to check if a specific attention head has a hook
+  function headHasHook(layerIdx, headIdx) {{
+    return hookData.hooks.some(h =>
+      h.layer === layerIdx &&
+      h.component === 'attention' &&
+      (h.heads === null || h.heads.includes(headIdx)));
+  }}
 
   let isExpanded = false;
 
@@ -637,13 +712,16 @@ def _generate_html(
       `;
 
       // Pre-attention LayerNorm block
+      const ln1Color = getComponentColor(layerIdx, 'ln1', '#D4E5D4');
+      const ln1Highlighted = hasHook(layerIdx, 'ln1');
       svg += `
-        <g class="ln-block"
+        <g class="ln-block${{ln1Highlighted ? ' highlighted' : ''}}"
+           data-component-id="layer-${{layerIdx}}-ln1"
            onmouseenter="showExpanded('${{vizId}}', 'ln-attn', ${{layerIdx}}, this)"
            onmouseleave="hideExpanded('${{vizId}}', 'ln-attn', ${{layerIdx}})">
           <rect x="${{lnAttnX - lnWidth/2}}" y="${{lnAttnY - lnHeight/2}}"
                 width="${{lnWidth}}" height="${{lnHeight}}"
-                rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+                rx="3" fill="${{ln1Color}}" stroke="${{ln1Highlighted ? '#666' : '#9AB89A'}}" stroke-width="1" />
           <text x="${{lnAttnX}}" y="${{lnAttnY + 4}}"
                 text-anchor="middle" class="ln-label">LN</text>
         </g>
@@ -671,6 +749,10 @@ def _generate_html(
         const headCenterX = headX + headSize/2;
         const isDots = headIdx === '...';
 
+        // Get per-head color and highlight status
+        const headColor = isDots ? '#E8D5B7' : getHeadColor(layerIdx, headIdx, '#E8D5B7');
+        const headHighlighted = isDots ? false : headHasHook(layerIdx, headIdx);
+
         // Arrow down into head (drops from the horizontal line)
         svg += `
           <line x1="${{headCenterX}}" y1="${{attnInputY}}"
@@ -692,6 +774,7 @@ def _generate_html(
         if (isDots) {{
           svg += `
             <g class="block" data-type="attention" data-layer="${{layerIdx}}"
+               data-component-id="layer-${{layerIdx}}-attention-dots"
                onmouseenter="showExpanded('${{vizId}}', 'attn', ${{layerIdx}}, this)"
                onmouseleave="hideExpanded('${{vizId}}', 'attn', ${{layerIdx}})">
               <rect x="${{headX}}" y="${{headsY}}"
@@ -703,12 +786,13 @@ def _generate_html(
           `;
         }} else {{
           svg += `
-            <g class="block" data-type="attention" data-layer="${{layerIdx}}" data-head="${{headIdx}}"
+            <g class="block${{headHighlighted ? ' highlighted' : ''}}" data-type="attention" data-layer="${{layerIdx}}" data-head="${{headIdx}}"
+               data-component-id="layer-${{layerIdx}}-attention-head-${{headIdx}}"
                onmouseenter="showExpanded('${{vizId}}', 'attn', ${{layerIdx}}, this)"
                onmouseleave="hideExpanded('${{vizId}}', 'attn', ${{layerIdx}})">
               <rect x="${{headX}}" y="${{headsY}}"
                     width="${{headSize}}" height="${{headSize}}"
-                    rx="4" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
+                    rx="4" fill="${{headColor}}" stroke="${{headHighlighted ? '#666' : '#C4A77D'}}" stroke-width="1" />
               <text x="${{headCenterX}}" y="${{headsY + headSize/2 + 5}}"
                     text-anchor="middle" class="block-label-italic">h<tspan baseline-shift="sub" font-size="10">${{headIdx}}</tspan></text>
             </g>
@@ -767,13 +851,16 @@ def _generate_html(
         `;
 
         // Pre-MLP LayerNorm block
+        const ln2Color = getComponentColor(layerIdx, 'ln2', '#D4E5D4');
+        const ln2Highlighted = hasHook(layerIdx, 'ln2');
         svg += `
-          <g class="ln-block"
+          <g class="ln-block${{ln2Highlighted ? ' highlighted' : ''}}"
+             data-component-id="layer-${{layerIdx}}-ln2"
              onmouseenter="showExpanded('${{vizId}}', 'ln-mlp', ${{layerIdx}}, this)"
              onmouseleave="hideExpanded('${{vizId}}', 'ln-mlp', ${{layerIdx}})">
             <rect x="${{lnMlpX - lnWidth/2}}" y="${{lnMlpY - lnHeight/2}}"
                   width="${{lnWidth}}" height="${{lnHeight}}"
-                  rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+                  rx="3" fill="${{ln2Color}}" stroke="${{ln2Highlighted ? '#666' : '#9AB89A'}}" stroke-width="1" />
             <text x="${{lnMlpX}}" y="${{lnMlpY + 4}}"
                   text-anchor="middle" class="ln-label">LN</text>
           </g>
@@ -794,13 +881,16 @@ def _generate_html(
         `;
 
         // MLP block
+        const mlpColor = getComponentColor(layerIdx, 'mlp', '#E8D5B7');
+        const mlpHighlighted = hasHook(layerIdx, 'mlp');
         svg += `
-          <g class="block" data-type="mlp" data-layer="${{layerIdx}}"
+          <g class="block${{mlpHighlighted ? ' highlighted' : ''}}" data-type="mlp" data-layer="${{layerIdx}}"
+             data-component-id="layer-${{layerIdx}}-mlp"
              onmouseenter="showExpanded('${{vizId}}', 'mlp', ${{layerIdx}}, this)"
              onmouseleave="hideExpanded('${{vizId}}', 'mlp', ${{layerIdx}})">
             <rect x="${{blockCenterX - blockWidth/2}}" y="${{mlpY}}"
                   width="${{blockWidth}}" height="${{blockHeight}}"
-                  rx="4" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
+                  rx="4" fill="${{mlpColor}}" stroke="${{mlpHighlighted ? '#666' : '#C4A77D'}}" stroke-width="1" />
             <text x="${{blockCenterX - 15}}" y="${{mlpY + blockHeight/2 + 5}}"
                   text-anchor="middle" class="block-label">MLP</text>
             <text x="${{blockCenterX + 30}}" y="${{mlpY + blockHeight/2 + 5}}"
@@ -947,6 +1037,40 @@ def _generate_html(
       const hiddenCount = totalLayers - initialLayers;
       container.innerHTML = generateSVG(initialLayers, canExpand && hiddenCount > 0, hiddenCount);
     }}
+
+    // Populate and show legend if there are hooks
+    const legend = document.getElementById(vizId + '-legend');
+    if (legend && hookData.legend.length > 0) {{
+      let legendHtml = '<div class="legend-title">Hooks</div>';
+      for (const item of hookData.legend) {{
+        legendHtml += `
+          <div class="legend-item">
+            <span class="legend-color" style="background: ${{item.color}}"></span>
+            <span class="legend-label">${{item.function}}</span>
+          </div>
+        `;
+      }}
+      legend.innerHTML = legendHtml;
+      legend.style.display = 'block';
+    }} else if (legend) {{
+      legend.style.display = 'none';
+    }}
+
+    // Highlight heads in expanded attention panels
+    const allHeadDivs = document.querySelectorAll('#' + vizId + ' .attention-head[data-layer][data-head]');
+    allHeadDivs.forEach(headDiv => {{
+      const layerIdx = parseInt(headDiv.getAttribute('data-layer'));
+      const headIdx = parseInt(headDiv.getAttribute('data-head'));
+      const color = getHeadColor(layerIdx, headIdx, null);
+      if (color) {{
+        headDiv.style.background = color;
+        headDiv.style.borderColor = '#666';
+      }} else {{
+        // Reset to default
+        headDiv.style.background = '';
+        headDiv.style.borderColor = '';
+      }}
+    }});
   }}
 
   function toggleExpand(id) {{
@@ -1063,8 +1187,16 @@ class InteractiveTransformerViz:
         max_layers: Optional[int] = None,
         width: int = 600,
         height: Optional[int] = None,
+        hooks: Optional[List[Tuple[str, Callable]]] = None,
     ) -> "InteractiveTransformerViz":
-        """Render the visualization."""
+        """Render the visualization.
+
+        Args:
+            max_layers: Maximum layers to show initially
+            width: Width in pixels
+            height: Height in pixels (auto-calculated if None)
+            hooks: List of (hook_name, hook_function) tuples to highlight
+        """
         if self.arch is None:
             raise ValueError("No architecture loaded. Use from_model(), from_dict(), etc.")
 
@@ -1074,6 +1206,7 @@ class InteractiveTransformerViz:
             max_layers=max_layers,
             width=width,
             height=height,
+            hooks=hooks,
         )
         return self
 
@@ -1115,6 +1248,7 @@ def visualize(
     max_layers: Optional[int] = None,
     width: int = 600,
     config: Optional[VisualizationConfig] = None,
+    hooks: Optional[List[Tuple[str, Callable]]] = None,
 ) -> InteractiveTransformerViz:
     """
     Quick function to visualize a transformer.
@@ -1124,9 +1258,19 @@ def visualize(
         max_layers: Maximum layers to show initially (default 8, click to expand)
         width: Width in pixels
         config: Optional visualization config
+        hooks: List of (hook_name, hook_function) tuples to highlight in the diagram.
+               Components with hooks are color-coded and a legend shows the mapping.
 
     Returns:
         InteractiveTransformerViz instance (displays automatically in Jupyter)
+
+    Example:
+        >>> def my_hook(tensor, hook):
+        ...     return tensor
+        >>> viz = visualize('gpt2-small', hooks=[
+        ...     ('blocks.1.attn.hook_pattern', my_hook),
+        ...     ('blocks.2.mlp.hook_post', ablation_fn),
+        ... ])
     """
     viz = InteractiveTransformerViz(config)
 
@@ -1137,5 +1281,5 @@ def visualize(
     else:
         viz.from_model(model_or_config)
 
-    viz.render(max_layers=max_layers, width=width)
+    viz.render(max_layers=max_layers, width=width, hooks=hooks)
     return viz
