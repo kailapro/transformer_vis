@@ -712,7 +712,7 @@ def _generate_html(
       `;
 
       // Pre-attention LayerNorm block
-      const ln1Color = getComponentColor(layerIdx, 'ln1', '#D4E5D4');
+      const ln1Color = getComponentColor(layerIdx, 'ln1', '#E8D5B7');
       const ln1Highlighted = hasHook(layerIdx, 'ln1');
       svg += `
         <g class="ln-block${{ln1Highlighted ? ' highlighted' : ''}}"
@@ -721,7 +721,7 @@ def _generate_html(
            onmouseleave="hideExpanded('${{vizId}}', 'ln-attn', ${{layerIdx}})">
           <rect x="${{lnAttnX - lnWidth/2}}" y="${{lnAttnY - lnHeight/2}}"
                 width="${{lnWidth}}" height="${{lnHeight}}"
-                rx="3" fill="${{ln1Color}}" stroke="${{ln1Highlighted ? '#666' : '#9AB89A'}}" stroke-width="1" />
+                rx="3" fill="${{ln1Color}}" stroke="${{ln1Highlighted ? '#666' : '#C4A77D'}}" stroke-width="1" />
           <text x="${{lnAttnX}}" y="${{lnAttnY + 4}}"
                 text-anchor="middle" class="ln-label">LN</text>
         </g>
@@ -851,7 +851,7 @@ def _generate_html(
         `;
 
         // Pre-MLP LayerNorm block
-        const ln2Color = getComponentColor(layerIdx, 'ln2', '#D4E5D4');
+        const ln2Color = getComponentColor(layerIdx, 'ln2', '#E8D5B7');
         const ln2Highlighted = hasHook(layerIdx, 'ln2');
         svg += `
           <g class="ln-block${{ln2Highlighted ? ' highlighted' : ''}}"
@@ -860,7 +860,7 @@ def _generate_html(
              onmouseleave="hideExpanded('${{vizId}}', 'ln-mlp', ${{layerIdx}})">
             <rect x="${{lnMlpX - lnWidth/2}}" y="${{lnMlpY - lnHeight/2}}"
                   width="${{lnWidth}}" height="${{lnHeight}}"
-                  rx="3" fill="${{ln2Color}}" stroke="${{ln2Highlighted ? '#666' : '#9AB89A'}}" stroke-width="1" />
+                  rx="3" fill="${{ln2Color}}" stroke="${{ln2Highlighted ? '#666' : '#C4A77D'}}" stroke-width="1" />
             <text x="${{lnMlpX}}" y="${{lnMlpY + 4}}"
                   text-anchor="middle" class="ln-label">LN</text>
           </g>
@@ -975,7 +975,7 @@ def _generate_html(
          onmouseleave="hidePanel('${{vizId}}', 'ln-final-expanded')">
         <rect x="${{residualX - lnWidth/2}}" y="${{finalLnY - lnHeight/2}}"
               width="${{lnWidth}}" height="${{lnHeight}}"
-              rx="3" fill="#D4E5D4" stroke="#9AB89A" stroke-width="1" />
+              rx="3" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
         <text x="${{residualX}}" y="${{finalLnY + 4}}"
               text-anchor="middle" class="ln-label">LN</text>
       </g>
