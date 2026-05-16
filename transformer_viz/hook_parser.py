@@ -1,19 +1,72 @@
 """
 Parse TransformerLens hook names to extract component information.
 
-Hook name format examples:
-- blocks.1.attn.hook_pattern -> Layer 1 attention
-- blocks.2.mlp.hook_post -> Layer 2 MLP
-- blocks.0.ln1.hook_normalized -> Layer 0 pre-attention LayerNorm
-- blocks.1.ln2.hook_normalized -> Layer 1 pre-MLP LayerNorm
-- hook_embed -> Embedding
-- hook_pos_embed -> Positional embedding
-- ln_final.hook_normalized -> Final LayerNorm
+Every HookedTransformer hookpoint maps to a visual region in the architecture
+diagram. The HOOKPOINT_MAP below defines this mapping exhaustively.
+
+Visual regions in the diagram (bottom to top):
+  ┌─────────────────────────────────────────────────────────────┐
+  │  tokens → [embed] → + ← [pos_embed]                       │
+  │                     │ (residual stream, dashed line)        │
+  │  ┌─ Layer X ────────┼──────────────────────────────────┐   │
+  │  │                   ├──→ [LN1] ──→ [h0][h1]...[h11] ─┤   │
+  │  │                   ⊕ ← attention output               │   │
+  │  │                   │                                   │   │
+  │  │                   ├──→ [LN2] ──→ [MLP] ─────────────┤   │
+  │  │                   ⊕ ← MLP output                     │   │
+  │  └───────────────────┼──────────────────────────────────┘   │
+  │                      │                                      │
+  │  [ln_final] → [unembed] → logits                           │
+  └─────────────────────────────────────────────────────────────┘
+
+Hookpoint → Visual region mapping:
+
+  HOOK NAME                         COMPONENT TYPE   VISUAL REGION
+  ─────────────────────────────────────────────────────────────────
+  hook_embed                        embed            Embed block
+  hook_pos_embed                    pos_embed        Pos_embed block
+
+  blocks.X.hook_resid_pre           resid            Residual: layer entry → attn ⊕
+  blocks.X.hook_resid_mid           resid            Residual: attn ⊕ → MLP ⊕
+  blocks.X.hook_resid_post          resid            Residual: MLP ⊕ → next LN branch
+
+  blocks.X.ln1.hook_scale           ln1              Pre-attention LN block
+  blocks.X.ln1.hook_normalized      ln1              Pre-attention LN block
+
+  blocks.X.hook_attn_in             attn_in          Arrow: residual → LN1 → heads
+  blocks.X.hook_q_input             attn_in          Arrow: residual → LN1 → heads
+  blocks.X.hook_k_input             attn_in          Arrow: residual → LN1 → heads
+  blocks.X.hook_v_input             attn_in          Arrow: residual → LN1 → heads
+
+  blocks.X.attn.hook_q              attention        Attention head blocks
+  blocks.X.attn.hook_k              attention        Attention head blocks
+  blocks.X.attn.hook_v              attention        Attention head blocks
+  blocks.X.attn.hook_z              attention        Attention head blocks
+  blocks.X.attn.hook_attn_scores    attention        Attention head blocks
+  blocks.X.attn.hook_pattern        attention        Attention head blocks
+  blocks.X.attn.hook_result         attention        Attention head blocks
+
+  blocks.X.hook_attn_out            attn_out         Arrow: heads → ⊕ on residual
+
+  blocks.X.ln2.hook_scale           ln2              Pre-MLP LN block
+  blocks.X.ln2.hook_normalized      ln2              Pre-MLP LN block
+
+  blocks.X.hook_mlp_in              mlp_in           Arrow: residual → LN2 → MLP
+  blocks.X.mlp.hook_pre             mlp              MLP block
+  blocks.X.mlp.hook_post            mlp              MLP block
+  blocks.X.hook_mlp_out             mlp_out          Arrow: MLP → ⊕ on residual
+
+  ln_final.hook_scale               ln_final         Final LayerNorm block
+  ln_final.hook_normalized          ln_final         Final LayerNorm block
 """
 
 import re
+import warnings
 from dataclasses import dataclass
 from typing import Optional, List, Dict, Callable, Tuple, Any
+
+# Hooks beyond this count can generate enough SVG to crash the Jupyter kernel
+_HOOK_COUNT_WARNING_THRESHOLD = 200
 
 # Distinct colors for different hook functions
 HOOK_COLORS = [
@@ -28,15 +81,82 @@ HOOK_COLORS = [
 ]
 
 
+# ── Hookpoint → component type mapping ──────────────────────────────────────
+#
+# Each entry is (regex_pattern, component_type).
+# Patterns are tried in order; first match wins.
+# Groups: group(1) = layer index (if present), remainder = subcomponent.
+#
+# "Layer-level" hooks use blocks.{layer}.hook_* format.
+# "Sub-module" hooks use blocks.{layer}.{module}.hook_* format.
+
+# Patterns for specific layer (blocks.{digit}.*)
+_LAYER_PATTERNS: List[Tuple[str, str]] = [
+    # Residual stream
+    (r'blocks\.(\d+)\.hook_resid_(pre|mid|post)',  'resid'),
+
+    # Pre-attention LayerNorm
+    (r'blocks\.(\d+)\.ln1\.(.+)',                  'ln1'),
+
+    # Attention inputs (block-level hooks for Q/K/V inputs)
+    (r'blocks\.(\d+)\.hook_attn_in',               'attn_in'),
+    (r'blocks\.(\d+)\.hook_q_input',               'attn_in'),
+    (r'blocks\.(\d+)\.hook_k_input',               'attn_in'),
+    (r'blocks\.(\d+)\.hook_v_input',               'attn_in'),
+
+    # Attention internals (sub-module hooks)
+    (r'blocks\.(\d+)\.attn\.(.+)',                  'attention'),
+
+    # Attention output (block-level)
+    (r'blocks\.(\d+)\.hook_attn_out',              'attn_out'),
+
+    # Pre-MLP LayerNorm
+    (r'blocks\.(\d+)\.ln2\.(.+)',                  'ln2'),
+
+    # MLP input (block-level)
+    (r'blocks\.(\d+)\.hook_mlp_in',               'mlp_in'),
+
+    # MLP internals (sub-module hooks)
+    (r'blocks\.(\d+)\.mlp\.(.+)',                  'mlp'),
+
+    # MLP output (block-level)
+    (r'blocks\.(\d+)\.hook_mlp_out',              'mlp_out'),
+]
+
+# Same patterns but with wildcard layer (blocks.*.*)
+_WILDCARD_PATTERNS: List[Tuple[str, str]] = [
+    (r'blocks\.\*\.hook_resid_(pre|mid|post)',     'resid'),
+    (r'blocks\.\*\.ln1\.(.+)',                     'ln1'),
+    (r'blocks\.\*\.hook_attn_in',                  'attn_in'),
+    (r'blocks\.\*\.hook_q_input',                  'attn_in'),
+    (r'blocks\.\*\.hook_k_input',                  'attn_in'),
+    (r'blocks\.\*\.hook_v_input',                  'attn_in'),
+    (r'blocks\.\*\.attn\.(.+)',                    'attention'),
+    (r'blocks\.\*\.hook_attn_out',                 'attn_out'),
+    (r'blocks\.\*\.ln2\.(.+)',                     'ln2'),
+    (r'blocks\.\*\.hook_mlp_in',                   'mlp_in'),
+    (r'blocks\.\*\.mlp\.(.+)',                     'mlp'),
+    (r'blocks\.\*\.hook_mlp_out',                  'mlp_out'),
+]
+
+# Global hooks (no layer index)
+_GLOBAL_PATTERNS: List[Tuple[str, str]] = [
+    (r'hook_embed$',                               'embed'),
+    (r'hook_pos_embed$',                           'pos_embed'),
+    (r'ln_final\.(.+)',                            'ln_final'),
+]
+
+
 @dataclass
 class ParsedHook:
     """Parsed information from a TransformerLens hook specification."""
     hook_name: str           # Original: 'blocks.1.attn.hook_pattern'
-    component_type: str      # 'attention', 'mlp', 'ln1', 'ln2', 'embed', 'pos_embed', 'resid', 'ln_final'
+    component_type: str      # 'attention', 'mlp', 'ln1', 'ln2', 'embed', 'pos_embed', 'resid', ...
     layer_idx: Optional[int] # 1 (or None for global hooks)
     subcomponent: str        # 'hook_pattern', 'hook_q', etc.
     function_name: str       # 'hook_function' (extracted from function.__name__)
     head_indices: Optional[List[int]] = None  # Specific heads to highlight (None = all heads)
+    wildcard_layer: bool = False  # True when blocks.* wildcard — matches all layers
 
 
 # Type alias for hook specifications
@@ -74,88 +194,33 @@ def parse_hook(hook_spec) -> ParsedHook:
     # Extract head indices from options
     head_indices = options.get('heads', None)
 
-    # Parse the hook name to determine component type and layer
-    component_type = 'unknown'
-    layer_idx = None
-    subcomponent = hook_name
+    # Try wildcard patterns first (blocks.*.*)
+    for pattern, component_type in _WILDCARD_PATTERNS:
+        m = re.match(pattern, hook_name)
+        if m:
+            subcomponent = m.group(0).split('.')[-1]  # last segment as subcomponent
+            # For attention, pass head_indices
+            hi = head_indices if component_type in ('attention', 'attn_in', 'attn_out') else None
+            return ParsedHook(hook_name, component_type, None, subcomponent, function_name, hi, wildcard_layer=True)
 
-    # Pattern: blocks.{L}.attn.* -> attention
-    attn_match = re.match(r'blocks\.(\d+)\.attn\.(.+)', hook_name)
-    if attn_match:
-        layer_idx = int(attn_match.group(1))
-        subcomponent = attn_match.group(2)
-        component_type = 'attention'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name, head_indices)
+    # Try specific-layer patterns (blocks.{digit}.*)
+    for pattern, component_type in _LAYER_PATTERNS:
+        m = re.match(pattern, hook_name)
+        if m:
+            layer_idx = int(m.group(1))
+            subcomponent = hook_name.split('.')[-1]  # last segment
+            hi = head_indices if component_type in ('attention', 'attn_in', 'attn_out') else None
+            return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name, hi)
 
-    # Pattern: blocks.{L}.hook_attn_* -> attention (alternative format)
-    attn_alt_match = re.match(r'blocks\.(\d+)\.hook_attn_(.+)', hook_name)
-    if attn_alt_match:
-        layer_idx = int(attn_alt_match.group(1))
-        subcomponent = 'hook_attn_' + attn_alt_match.group(2)
-        component_type = 'attention'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name, head_indices)
-
-    # Pattern: blocks.{L}.mlp.* -> mlp
-    mlp_match = re.match(r'blocks\.(\d+)\.mlp\.(.+)', hook_name)
-    if mlp_match:
-        layer_idx = int(mlp_match.group(1))
-        subcomponent = mlp_match.group(2)
-        component_type = 'mlp'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: blocks.{L}.hook_mlp_* -> mlp (alternative format)
-    mlp_alt_match = re.match(r'blocks\.(\d+)\.hook_mlp_(.+)', hook_name)
-    if mlp_alt_match:
-        layer_idx = int(mlp_alt_match.group(1))
-        subcomponent = 'hook_mlp_' + mlp_alt_match.group(2)
-        component_type = 'mlp'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: blocks.{L}.ln1.* -> ln1 (pre-attention LayerNorm)
-    ln1_match = re.match(r'blocks\.(\d+)\.ln1\.(.+)', hook_name)
-    if ln1_match:
-        layer_idx = int(ln1_match.group(1))
-        subcomponent = ln1_match.group(2)
-        component_type = 'ln1'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: blocks.{L}.ln2.* -> ln2 (pre-MLP LayerNorm)
-    ln2_match = re.match(r'blocks\.(\d+)\.ln2\.(.+)', hook_name)
-    if ln2_match:
-        layer_idx = int(ln2_match.group(1))
-        subcomponent = ln2_match.group(2)
-        component_type = 'ln2'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: blocks.{L}.hook_resid_* -> resid
-    resid_match = re.match(r'blocks\.(\d+)\.hook_resid_(.+)', hook_name)
-    if resid_match:
-        layer_idx = int(resid_match.group(1))
-        subcomponent = 'hook_resid_' + resid_match.group(2)
-        component_type = 'resid'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: hook_embed -> embed
-    if hook_name == 'hook_embed':
-        component_type = 'embed'
-        subcomponent = 'hook_embed'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: hook_pos_embed -> pos_embed
-    if hook_name == 'hook_pos_embed':
-        component_type = 'pos_embed'
-        subcomponent = 'hook_pos_embed'
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
-
-    # Pattern: ln_final.* -> ln_final
-    ln_final_match = re.match(r'ln_final\.(.+)', hook_name)
-    if ln_final_match:
-        component_type = 'ln_final'
-        subcomponent = ln_final_match.group(1)
-        return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
+    # Try global patterns
+    for pattern, component_type in _GLOBAL_PATTERNS:
+        m = re.match(pattern, hook_name)
+        if m:
+            subcomponent = hook_name
+            return ParsedHook(hook_name, component_type, None, subcomponent, function_name)
 
     # Fallback for unrecognized patterns
-    return ParsedHook(hook_name, component_type, layer_idx, subcomponent, function_name)
+    return ParsedHook(hook_name, 'unknown', None, hook_name, function_name)
 
 
 def assign_colors(parsed_hooks: List[ParsedHook]) -> Dict[str, str]:
@@ -193,6 +258,19 @@ def process_hooks(hooks: List) -> Dict[str, Any]:
     if not hooks:
         return {'hooks': [], 'legend': []}
 
+    if len(hooks) > _HOOK_COUNT_WARNING_THRESHOLD:
+        warnings.warn(
+            f"You passed {len(hooks)} hooks to the visualizer, but rendering more than "
+            f"{_HOOK_COUNT_WARNING_THRESHOLD} can generate very large SVG and may crash "
+            f"the Jupyter kernel.\n\n"
+            f"Tip: pass one representative hook per component type instead of all hooks. "
+            f"For example, if you want to show all hookpoints that exist in the model, "
+            f"use one hook per component (embed, pos_embed, attn, mlp, resid, ln1, ln2, "
+            f"ln_final) rather than iterating model.hook_dict.keys().",
+            UserWarning,
+            stacklevel=2,
+        )
+
     parsed = [parse_hook(h) for h in hooks]
     color_map = assign_colors(parsed)
 
@@ -206,6 +284,7 @@ def process_hooks(hooks: List) -> Dict[str, Any]:
                 'hookName': h.hook_name,
                 'subcomponent': h.subcomponent,
                 'heads': h.head_indices,  # None means all heads, list means specific heads
+                'wildcardLayer': h.wildcard_layer,
             }
             for h in parsed
         ],

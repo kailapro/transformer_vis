@@ -29,13 +29,26 @@ def _generate_html(
 
     viz_id = f"transformer_viz_{uuid.uuid4().hex[:8]}"
 
+    # Expand blocks.* wildcards into per-layer hooks before processing
+    if hooks:
+        import re as _re
+        expanded = []
+        for spec in hooks:
+            hook_name = spec[0]
+            if _re.match(r'blocks\.\*\.', hook_name):
+                for i in range(arch.n_layers):
+                    expanded.append((hook_name.replace('blocks.*', f'blocks.{i}'),) + spec[1:])
+            else:
+                expanded.append(spec)
+        hooks = expanded
+
     total_layers = arch.n_layers
     default_max = 8
     initial_layers = min(total_layers, max_layers if max_layers else default_max)
     can_expand = total_layers > initial_layers
 
     # Calculate dimensions - flow is bottom to top
-    layer_height = 280  # Increased to accommodate LayerNorm blocks
+    layer_height = 355  # Matches actual per-layer Y advancement
     header_height = 220  # Space for logits + final LN at top
     footer_height = 160  # Space for tokens/embed + pos embed at bottom
 
@@ -291,6 +304,11 @@ def _generate_html(
     #{viz_id} .residual-hover:hover .residual-stream {{
       stroke-width: 2.5;
     }}
+    #{viz_id} .resid-highlight {{
+      stroke-width: 6;
+      stroke-opacity: 0.5;
+      stroke-linecap: butt;
+    }}
     #{viz_id} .expand-btn {{
       cursor: pointer;
     }}
@@ -354,6 +372,14 @@ def _generate_html(
     }}
     #{viz_id} .ln-block.highlighted rect {{
       stroke-width: 2;
+    }}
+    #{viz_id} .flow-line.highlighted,
+    #{viz_id} .flow-arrow.highlighted {{
+      stroke-width: 3;
+      stroke: #FF9F45;
+    }}
+    #{viz_id} .flow-arrow.highlighted {{
+      marker-end: url(#{viz_id}-arrowhead-highlighted);
     }}
     #{viz_id} .learn-mode-btn {{
       background: white;
@@ -796,21 +822,23 @@ def _generate_html(
   // Helper function to get highlight color for a component (non-attention)
   function getComponentColor(layerIdx, componentType, defaultColor) {{
     const hook = hookData.hooks.find(h =>
-      h.layer === layerIdx && h.component === componentType);
+      h.component === componentType &&
+      (h.wildcardLayer || h.layer === layerIdx));
     return hook ? hook.color : defaultColor;
   }}
 
   // Helper to check if a component has a hook (non-attention)
   function hasHook(layerIdx, componentType) {{
     return hookData.hooks.some(h =>
-      h.layer === layerIdx && h.component === componentType);
+      h.component === componentType &&
+      (h.wildcardLayer || h.layer === layerIdx));
   }}
 
   // Helper to get highlight color for a specific attention head
   function getHeadColor(layerIdx, headIdx, defaultColor) {{
     const hook = hookData.hooks.find(h =>
-      h.layer === layerIdx &&
       h.component === 'attention' &&
+      (h.wildcardLayer || h.layer === layerIdx) &&
       (h.heads === null || h.heads.includes(headIdx)));
     return hook ? hook.color : defaultColor;
   }}
@@ -818,17 +846,33 @@ def _generate_html(
   // Helper to check if a specific attention head has a hook
   function headHasHook(layerIdx, headIdx) {{
     return hookData.hooks.some(h =>
-      h.layer === layerIdx &&
       h.component === 'attention' &&
+      (h.wildcardLayer || h.layer === layerIdx) &&
       (h.heads === null || h.heads.includes(headIdx)));
+  }}
+
+  // Helper for residual stream hooks (need subcomponent matching)
+  function getResidColor(layerIdx, subcomponent, defaultColor) {{
+    const hook = hookData.hooks.find(h =>
+      h.component === 'resid' &&
+      (h.wildcardLayer || h.layer === layerIdx) &&
+      h.subcomponent === subcomponent);
+    return hook ? hook.color : defaultColor;
+  }}
+
+  function hasResidHook(layerIdx, subcomponent) {{
+    return hookData.hooks.some(h =>
+      h.component === 'resid' &&
+      (h.wildcardLayer || h.layer === layerIdx) &&
+      h.subcomponent === subcomponent);
   }}
 
   let isExpanded = false;
   let pinnedPanelId = null;
 
   function generateSVG(numLayers, showEllipsis, hiddenCount) {{
-    // Extra space at top for unembed/logits
-    const topPadding = 180;
+    // Extra space at top for final LN + unembed + logits + arrow + title
+    const topPadding = 290;
     const totalHeight = topPadding + numLayers * layerHeight + footerHeight + (showEllipsis ? 50 : 0);
 
     let svg = `
@@ -836,6 +880,9 @@ def _generate_html(
       <defs>
         <marker id="${{vizId}}-arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
           <polygon points="0 0, 8 3, 0 6" fill="#4A4A4A" />
+        </marker>
+        <marker id="${{vizId}}-arrowhead-highlighted" markerWidth="4" markerHeight="3" refX="3.5" refY="1.5" orient="auto">
+          <polygon points="0 0, 4 1.5, 0 3" fill="#FF9F45" />
         </marker>
       </defs>
     `;
@@ -870,13 +917,15 @@ def _generate_html(
     `;
 
     // Embed block (centered on residual stream)
+    const embedColor = getComponentColor(null, 'embed', '#E8D5B7');
+    const embedHighlighted = hasHook(null, 'embed');
     svg += `
-      <g class="block"
+      <g class="block${{embedHighlighted ? ' highlighted' : ''}}"
          onmouseenter="showPanel('${{vizId}}', 'embed-expanded', this)"
          onmouseleave="hidePanel('${{vizId}}', 'embed-expanded')">
         <rect x="${{residualX - blockWidth/2}}" y="${{embedY - blockHeight/2}}"
               width="${{blockWidth}}" height="${{blockHeight}}"
-              rx="4" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
+              rx="4" fill="${{embedColor}}" stroke="#C4A77D" stroke-width="1" />
         <text x="${{residualX}}" y="${{embedY + 4}}"
               text-anchor="middle" class="block-label">embed</text>
       </g>
@@ -892,13 +941,15 @@ def _generate_html(
               x2="${{residualX}}" y2="${{posEmbedAddY + addCircleRadius + 2}}"
               class="flow-line" />
       `;
+      const posEmbedColor = getComponentColor(null, 'pos_embed', '#E8D5B7');
+      const posEmbedHighlighted = hasHook(null, 'pos_embed');
       svg += `
-        <g class="block"
+        <g class="block${{posEmbedHighlighted ? ' highlighted' : ''}}"
            onmouseenter="showPanel('${{vizId}}', 'pos-embed-expanded', this)"
            onmouseleave="hidePanel('${{vizId}}', 'pos-embed-expanded')">
           <rect x="${{posEmbedX - 70}}" y="${{posEmbedAddY - 15}}"
                 width="140" height="30"
-                rx="4" fill="#E8D5B7" stroke="#C4A77D" stroke-width="1" />
+                rx="4" fill="${{posEmbedColor}}" stroke="#C4A77D" stroke-width="1" />
           <text x="${{posEmbedX}}" y="${{posEmbedAddY + 4}}"
                 text-anchor="middle" class="block-label">pos_embed</text>
         </g>
@@ -967,10 +1018,28 @@ def _generate_html(
 
       // Calculate layer box dimensions first
       const layerBoxPadding = 15;
-      const layerBoxBottom = currentY + 10;  // Bottom of this layer's box
+      // layerBoxBottom computed after we know lnAttnY (see below)
+
+      // === LAYOUT SPACING CONSTANTS ===
+      // Consistent spacing used for both attention and MLP sections:
+      const gapResidToLN = 30;       // dashed line from entry/+ circle to LN branch
+      const gapLNToComponent = 30;   // from LN to component input
+      const gapComponentToOutput = 20; // from component top to output merge line
+      const gapAfterAdd = 40;        // dashed line above + circle before next section
 
       // === PRE-ATTENTION LAYERNORM + ATTENTION HEADS ===
-      const headsY = currentY - 90;  // Moved up to make room for LN
+      // Layout flows bottom-to-top (decreasing Y):
+      //   currentY → [gapResidToLN] → LN → [gapLNToInput] → input line
+      //   → [gapInputToComponent] → head bottoms → heads → head tops
+      //   → [gapComponentToAdd] → + circle (output merges directly at +)
+      const gapLNToInput = 15;       // LN to the horizontal input distribution line
+      const gapInputToComponent = 15; // input line to component bottom edge
+      const gapComponentToAdd = 20;  // component top to + circle (output meets residual here)
+
+      const lnAttnY = currentY - gapResidToLN;
+      const attnInputY = lnAttnY - gapLNToInput - lnHeight/2;
+      const headsY = attnInputY - gapInputToComponent - headSize;  // top of head boxes
+      const attnAddY = headsY - gapComponentToAdd;  // + circle = where output meets residual
 
       // Calculate heads layout - show h0, h1, ..., h(n-1)
       const showFirstHeads = 2;  // Show h0, h1
@@ -980,20 +1049,12 @@ def _generate_html(
       const headsStartX = blockCenterX - totalHeadsWidth / 2;
       const headsEndX = headsStartX + totalHeadsWidth;
 
-      // Y positions for this attention section
-      const lnAttnY = headsY + headSize + 45;  // LN position
-      const attnInputY = headsY + headSize + 15;  // Where horizontal line to heads is
-      const attnOutputY = headsY - 20;  // Where arrows go up to
-      const attnAddY = attnOutputY;  // Where + circle is
+      // Layer box bottom: where residual feeds into LN
+      const layerBoxBottom = currentY;
+      // Track where the last component output meets the residual stream
+      let layerLastOutputY = attnAddY;
 
       addCircles.push({{ x: residualX, y: attnAddY }});
-
-      // Arrow from residual down to LN level
-      svg += `
-        <line x1="${{residualX}}" y1="${{lnAttnY + 25}}"
-              x2="${{residualX}}" y2="${{lnAttnY}}"
-              class="flow-line" />
-      `;
 
       // LN position (between residual and heads)
       const lnAttnX = residualX - 60;
@@ -1022,13 +1083,15 @@ def _generate_html(
       `;
 
       // Arrow from LN down to horizontal attention input line
+      const attnInHighlighted = hasHook(layerIdx, 'attn_in');
+      const attnInClass = attnInHighlighted ? 'flow-line highlighted' : 'flow-line';
       svg += `
         <line x1="${{lnAttnX}}" y1="${{lnAttnY - lnHeight/2}}"
               x2="${{lnAttnX}}" y2="${{attnInputY}}"
-              class="flow-line" />
+              class="${{attnInClass}}" />
         <line x1="${{lnAttnX}}" y1="${{attnInputY}}"
               x2="${{headsStartX + headSize/2}}" y2="${{attnInputY}}"
-              class="flow-line" />
+              class="${{attnInClass}}" />
       `;
 
       // Draw attention heads: h0, h1, ..., h(n-1)
@@ -1106,19 +1169,21 @@ def _generate_html(
         // Arrow up from head
         svg += `
           <line x1="${{headCenterX}}" y1="${{headsY}}"
-                x2="${{headCenterX}}" y2="${{attnOutputY}}"
+                x2="${{headCenterX}}" y2="${{attnAddY}}"
                 class="flow-line" />
         `;
       }}
 
-      // Horizontal merge line at top, then right to + circle
+      // Horizontal merge line at top, then straight right to + circle on residual stream
+      const attnOutHighlighted = hasHook(layerIdx, 'attn_out');
+      const attnOutClass = attnOutHighlighted ? 'flow-line highlighted' : 'flow-line';
       svg += `
-        <line x1="${{headsStartX + headSize/2}}" y1="${{attnOutputY}}"
-              x2="${{headsEndX - headSize/2}}" y2="${{attnOutputY}}"
-              class="flow-line" />
-        <line x1="${{headsEndX - headSize/2}}" y1="${{attnOutputY}}"
-              x2="${{residualX - addCircleRadius - 2}}" y2="${{attnAddY}}"
-              class="flow-line" />
+        <line x1="${{headsStartX + headSize/2}}" y1="${{attnAddY}}"
+              x2="${{headsEndX - headSize/2}}" y2="${{attnAddY}}"
+              class="${{attnOutClass}}" />
+        <line x1="${{headsEndX - headSize/2}}" y1="${{attnAddY}}"
+              x2="${{residualX - addCircleRadius}}" y2="${{attnAddY}}"
+              class="${{attnOutClass}}" />
       `;
 
       // x_i+1 label
@@ -1126,26 +1191,24 @@ def _generate_html(
         <text x="${{residualX + 20}}" y="${{attnAddY + 5}}" class="residual-label">x<tspan baseline-shift="sub" font-size="10">${{layerIdx*2 + 1}}</tspan></text>
       `;
 
-      currentY = attnAddY - 25;
+      currentY = attnAddY - gapAfterAdd;
+
+      // Track Y positions for residual stream highlights
+      let layerLastAddY = attnAddY;  // updated to mlpAddY if MLP exists
 
       // === PRE-MLP LAYERNORM + MLP ===
       if (hasMLP) {{
-        const mlpY = currentY - 90;  // Increased gap to accommodate LN
-        const mlpOutputY = mlpY - 20;
-        const mlpAddY = mlpOutputY;
+        // Same spacing pattern as attention section
+        const lnMlpY = currentY - gapResidToLN;
+        const mlpInputY = lnMlpY - gapLNToInput - lnHeight/2;
+        const mlpY = mlpInputY - gapInputToComponent - blockHeight; // top edge
+        const mlpAddY = mlpY - gapComponentToAdd;  // + circle = where output meets residual
+        layerLastAddY = mlpAddY;
+        layerLastOutputY = mlpAddY;
 
         addCircles.push({{ x: residualX, y: mlpAddY }});
 
-        // LN position for MLP
-        const lnMlpY = mlpY + blockHeight + 45;
         const lnMlpX = residualX - 60;
-
-        // Arrow from residual down to LN level
-        svg += `
-          <line x1="${{residualX}}" y1="${{lnMlpY + 25}}"
-                x2="${{residualX}}" y2="${{lnMlpY}}"
-                class="flow-line" />
-        `;
 
         // Arrow from residual to LN
         svg += `
@@ -1171,17 +1234,18 @@ def _generate_html(
         `;
 
         // Arrow from LN up to MLP
-        const mlpInputY = mlpY + blockHeight + 15;
+        const mlpInHighlighted = hasHook(layerIdx, 'mlp_in');
+        const mlpInClass = mlpInHighlighted ? 'flow-line highlighted' : 'flow-line';
         svg += `
           <line x1="${{lnMlpX}}" y1="${{lnMlpY - lnHeight/2}}"
                 x2="${{lnMlpX}}" y2="${{mlpInputY}}"
-                class="flow-line" />
+                class="${{mlpInClass}}" />
           <line x1="${{lnMlpX}}" y1="${{mlpInputY}}"
                 x2="${{blockCenterX}}" y2="${{mlpInputY}}"
-                class="flow-line" />
+                class="${{mlpInClass}}" />
           <line x1="${{blockCenterX}}" y1="${{mlpInputY}}"
                 x2="${{blockCenterX}}" y2="${{mlpY + blockHeight + 2}}"
-                class="flow-arrow" />
+                class="${{mlpInClass.replace('flow-line', 'flow-arrow')}}" />
         `;
 
         // MLP block
@@ -1202,14 +1266,16 @@ def _generate_html(
           </g>
         `;
 
-        // Arrow up from MLP (centered), then right to + circle
+        // Arrow up from MLP (centered), then straight right to + circle
+        const mlpOutHighlighted = hasHook(layerIdx, 'mlp_out');
+        const mlpOutClass = mlpOutHighlighted ? 'flow-line highlighted' : 'flow-line';
         svg += `
           <line x1="${{blockCenterX}}" y1="${{mlpY}}"
-                x2="${{blockCenterX}}" y2="${{mlpOutputY}}"
-                class="flow-line" />
-          <line x1="${{blockCenterX}}" y1="${{mlpOutputY}}"
-                x2="${{residualX - addCircleRadius - 2}}" y2="${{mlpAddY}}"
-                class="flow-line" />
+                x2="${{blockCenterX}}" y2="${{mlpAddY}}"
+                class="${{mlpOutClass}}" />
+          <line x1="${{blockCenterX}}" y1="${{mlpAddY}}"
+                x2="${{residualX - addCircleRadius}}" y2="${{mlpAddY}}"
+                class="${{mlpOutClass}}" />
         `;
 
         // x_i+2 label
@@ -1217,13 +1283,41 @@ def _generate_html(
           <text x="${{residualX + 20}}" y="${{mlpAddY + 5}}" class="residual-label">x<tspan baseline-shift="sub" font-size="10">${{layerIdx*2 + 2}}</tspan></text>
         `;
 
-        currentY = mlpAddY - 25;
+        currentY = mlpAddY - gapAfterAdd;
       }} else {{
-        currentY = attnAddY - 25;
+        currentY = attnAddY - gapAfterAdd;
+      }}
+
+      // Residual stream section highlights
+      // Each highlight is anchored to the + circles, which are the architectural landmarks:
+      //   resid_pre  = residual entering the layer (below the attention + circle)
+      //   resid_mid  = residual between attention + and MLP + (after attn, before MLP)
+      //   resid_post = residual leaving the layer (above the last + circle)
+      //
+      // layerBoxBottom marks where the residual enters the layer from below.
+      // attnAddY is the attention + circle center.
+      // layerLastAddY is the last + circle (MLP if present, otherwise attention).
+      // currentY is where the residual exits the layer upward.
+
+      if (hasResidHook(layerIdx, 'hook_resid_pre')) {{
+        const c = getResidColor(layerIdx, 'hook_resid_pre', '#FFD93D');
+        svg += `<line x1="${{residualX}}" y1="${{layerBoxBottom}}" x2="${{residualX}}" y2="${{attnAddY + addCircleRadius}}" class="resid-highlight" stroke="${{c}}" />`;
+      }}
+
+      if (hasResidHook(layerIdx, 'hook_resid_mid')) {{
+        const c = getResidColor(layerIdx, 'hook_resid_mid', '#FFD93D');
+        svg += `<line x1="${{residualX}}" y1="${{attnAddY - addCircleRadius}}" x2="${{residualX}}" y2="${{layerLastAddY + addCircleRadius}}" class="resid-highlight" stroke="${{c}}" />`;
+      }}
+
+      if (hasResidHook(layerIdx, 'hook_resid_post')) {{
+        const c = getResidColor(layerIdx, 'hook_resid_post', '#FFD93D');
+        // Extend highlight from above + circle all the way to where the next LN branches off
+        const nextBranchY = (layerIdx < numLayers - 1) ? currentY - gapResidToLN : currentY;
+        svg += `<line x1="${{residualX}}" y1="${{layerLastAddY - addCircleRadius}}" x2="${{residualX}}" y2="${{nextBranchY}}" class="resid-highlight" stroke="${{c}}" />`;
       }}
 
       // Draw layer box (dashed rectangle around the layer)
-      const layerBoxTop = currentY + 5;  // Top of this layer's box
+      const layerBoxTop = layerLastOutputY - 10;  // Top: where last component output meets residual
       const layerBoxLeft = 50;
       const layerBoxRight = residualX + 80;
       const layerBoxWidth = layerBoxRight - layerBoxLeft;
@@ -1323,6 +1417,16 @@ def _generate_html(
         <text x="${{residualX}}" y="${{logitsY + 4}}"
               text-anchor="middle" class="block-label">logits</text>
       </g>
+    `;
+
+    // Model name title above logits
+    const titleY = logitsY - blockHeight/2 - 20;
+    svg += `
+      <text x="${{residualX}}" y="${{titleY}}"
+            text-anchor="middle"
+            style="font-size: 18px; font-weight: bold; fill: #4A4A4A; font-family: 'Times New Roman', serif;">
+        ${{archInfo.modelName}}
+      </text>
     `;
 
     // Draw all + circles on top
@@ -1427,11 +1531,20 @@ def _generate_html(
     if (id !== vizId) return;
     const panel = document.getElementById(id + '-' + panelId);
     if (panel) {{
+      // Make visible first so we can measure, then position
+      panel.style.visibility = 'hidden';
+      panel.classList.add('visible');
       const rect = element.getBoundingClientRect();
       const container = document.getElementById(id).getBoundingClientRect();
-      panel.style.left = (rect.right - container.left + 10) + 'px';
-      panel.style.top = (rect.top - container.top) + 'px';
-      panel.classList.add('visible');
+      let left = rect.right - container.left + 10;
+      let top = rect.top - container.top;
+      // Clamp so panel stays within the container
+      const maxTop = container.height - panel.offsetHeight - 10;
+      if (top > maxTop) top = maxTop;
+      if (top < 0) top = 0;
+      panel.style.left = left + 'px';
+      panel.style.top = top + 'px';
+      panel.style.visibility = '';
     }}
   }}
 

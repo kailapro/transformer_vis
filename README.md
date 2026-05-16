@@ -306,6 +306,20 @@ Dataclass containing model architecture specifications.
 - `n_ctx`: Context length (optional)
 - `model_name`: Name of the model
 
+## Roadmap
+
+### Collapsible/Expandable Components
+Make the architecture diagram fully collapsible and expandable at the layer and sub-component level, similar to the [HuggingFace model viewer](https://hfviewer.com/). This would let users drill into specific layers without the full diagram being overwhelming for large models.
+
+### Interactive Technique Demonstrations
+Extend the visualizer to show step-by-step animations of mechanistic interpretability techniques:
+
+- **Activation patching walkthrough**: Visually show how patching iterates through each component of the model — highlighting which layer/component is being patched, showing the clean activation being injected, and displaying how the logit diff and patching metric change at each step. The goal is to make it immediately obvious what's happening, since the core idea is simple but can look intimidating when written out in code.
+- **Logit lens**: Show intermediate predictions at each layer by projecting through the unembedding.
+- **Other techniques** (linear probes, attention pattern visualization, etc.) as the project grows.
+
+The motivation: these techniques are conceptually straightforward, but the way they're typically presented (dense code + math notation) can make them seem more complex than they are. Visual, animated walkthroughs would make them much more accessible.
+
 ## License
 
 MIT
