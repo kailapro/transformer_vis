@@ -2,6 +2,8 @@
 
 An interactive visualization library for transformer model architectures, compatible with [TransformerLens](https://github.com/neelnanda-io/TransformerLens). Styled after the diagrams in [Anthropic's Transformer Circuits publications](https://transformer-circuits.pub/2021/framework/index.html).
 
+**[Interactive Demos](https://kailapro.github.io/transformer_vis/)** — Step-by-step walkthroughs of mech interp techniques like [activation patching](https://kailapro.github.io/transformer_vis/activation_patching_demo.html).
+
 ## Features
 
 - Interactive SVG visualizations that render inline in Jupyter notebooks

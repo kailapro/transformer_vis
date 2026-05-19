@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+  body { font-family: 'Times New Roman', serif; background: white; display: flex; flex-direction: column; align-items: center; padding: 20px; padding-bottom: 140px; }
+  .toolbar {
+    position: fixed; bottom: 0; left: 0; right: 0;
+    background: white; border-top: 1px solid #ddd;
+    box-shadow: 0 -2px 8px rgba(0,0,0,0.08);
+    padding: 10px 20px 14px 20px;
+    z-index: 100;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .controls { text-align: center; margin-bottom: 6px; }
+  .controls button {
+    font-family: 'Times New Roman', serif;
+    padding: 6px 16px; margin: 0 4px; cursor: pointer;
+    border: 1px solid #aaa; border-radius: 4px; background: white; font-size: 13px;
+  }
+  .controls button:hover { background: #f0f0f0; }
+  .controls button.active { background: #E8D5B7; border-color: #C4A77D; }
+  .speed-control { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #888; margin-top: 4px; }
+  .speed-control input { width: 100px; cursor: pointer; }
+  .speed-label { min-width: 30px; text-align: center; color: #4A4A4A; }
+  .step-label {
+    font-size: 13px; color: #4A4A4A; margin: 4px 0;
+    min-height: 18px; text-align: center; max-width: 600px; line-height: 1.4;
+  }
+  .legend { display: flex; gap: 18px; justify-content: center; margin-bottom: 4px; font-size: 12px; color: #4A4A4A; }
+  .legend-item { display: flex; align-items: center; gap: 5px; }
+  .legend-swatch { width: 12px; height: 12px; border-radius: 2px; border: 1px solid #aaa; }
+  svg text { font-family: 'Times New Roman', serif; }
+
+  /* Match original viz styles */
+  .residual-stream { stroke: #888; stroke-width: 1.5; stroke-dasharray: 6,4; }
+  .flow-arrow { stroke: #4A4A4A; stroke-width: 1.5; marker-end: url(#arrowhead); }
+  .flow-line { stroke: #4A4A4A; stroke-width: 1.5; }
+  .block-label { font-size: 14px; fill: #4A4A4A; }
+  .block-label-italic { font-size: 14px; fill: #4A4A4A; font-style: italic; }
+  .ln-label { font-size: 11px; fill: #4A4A4A; }
+  .add-symbol { font-size: 16px; fill: #888; text-anchor: middle; dominant-baseline: central; }
+  .resid-highlight { stroke-width: 4; stroke-linecap: butt; opacity: 0.6; }
+</style>
+</head>
+<body>
+
+<svg id="diagram" width="600" height="1050"></svg>
+
+<div class="toolbar">
+  <div class="legend">
+    <div class="legend-item"><div class="legend-swatch" style="background: #e57373;"></div> Corrupted</div>
+    <div class="legend-item"><div class="legend-swatch" style="background: #81c784;"></div> Clean (patched)</div>
+    <div class="legend-item"><div class="legend-swatch" style="background: #ffb74d;"></div> Mixed</div>
+  </div>
+  <div class="step-label" id="step-label"></div>
+  <div class="controls">
+    <button onclick="prevStep()">&larr; Prev</button>
+    <button id="btn-play" onclick="togglePlay()">Play</button>
+    <button onclick="nextStep()">Next &rarr;</button>
+    <button onclick="resetAnim()">Reset</button>
+  </div>
+  <div class="speed-control">
+    <span>Slow</span>
+    <input type="range" id="speed-slider" min="1" max="5" value="3" oninput="updateSpeed()">
+    <span>Fast</span>
+    <span class="speed-label" id="speed-label">1.5s</span>
+  </div>
+</div>
+
+<script>
+// ---- Layout constants matching interactive.py ----
+const W = 600;
+const residualX = 450;
+const blockCenterX = 200;
+const blockWidth = 200;
+const blockHeight = 40;
+const lnWidth = 40;
+const lnHeight = 25;
+const headSize = 50;
+const headGap = 8;
+const addCircleRadius = 14;
+const lnX = residualX - 60; // LN blocks positioned here
+
+// Spacing constants
+const gapResidToLN = 30;
+const gapLNToInput = 15;
+const gapInputToComponent = 15;
+const gapComponentToAdd = 20;
+const gapAfterAdd = 40;
+
+// Colors
+const blockColor = '#E8D5B7';
+const blockBorder = '#C4A77D';
+const textColor = '#4A4A4A';
+
+// State colors
+const C = {
+  corrupted: '#e57373', clean: '#81c784', mixed: '#ffb74d',
+  corrupted_border: '#c62828', clean_border: '#2e7d32', mixed_border: '#e6a817',
+};
+
+// We show 3 layers (0,1,2) + embed at bottom + logits at top
+const numLayers = 3;
+const footerHeight = 160;
+const topPadding = 120;
+
+// Calculate total height
+// Each layer needs: gapResidToLN + LN + gapLNToInput + gapInputToComponent + headSize + gapComponentToAdd
+//                 + gapAfterAdd + gapResidToLN + LN + gapLNToInput + gapInputToComponent + blockHeight + gapComponentToAdd + gapAfterAdd
+const attnSectionH = gapResidToLN + lnHeight/2 + gapLNToInput + gapInputToComponent + headSize + gapComponentToAdd;
+const mlpSectionH = gapAfterAdd + gapResidToLN + lnHeight/2 + gapLNToInput + gapInputToComponent + blockHeight + gapComponentToAdd;
+const layerHeight = attnSectionH + mlpSectionH + gapAfterAdd;
+const totalHeight = topPadding + numLayers * layerHeight + footerHeight;
+
+// Token info for the position visualization
+const tokens = ['<|eos|>', 'The', ' Col', 'os', 'se', 'um', ' is', ' in'];
+const seqLen = tokens.length;
+const patchPos = 7; // position 7 = " in" (last token)
+
+// Steps
+const steps = [
+  { id: 'start', label: 'The corrupted input "The Colosseum is in" enters the model as token embeddings.' },
+  { id: 'embed', label: 'Tokens are embedded into 768-dimensional vectors. The residual stream begins — fully corrupted (red).' },
+  { id: 'l0_attn_in', label: 'Layer 0: the residual stream flows through LayerNorm into the attention heads.' },
+  { id: 'l0_attn_out', label: 'Layer 0: attention output is added back to the residual stream. Still fully corrupted.' },
+  { id: 'l0_mlp_in', label: 'Layer 0: the residual stream flows through LayerNorm into the MLP.' },
+  { id: 'l0_mlp_compute', label: 'Layer 0 MLP computes its output — 8 vectors (one per token position), each 768-dimensional. Currently corrupted.' },
+  { id: 'l0_mlp_patch', label: 'PATCH: We replace ONLY position 7 (" in") of the MLP output with the clean activation. Just one 768-vector out of 8.' },
+  { id: 'l0_mlp_out', label: 'The MLP output (with position 7 patched green) is added to the residual stream. The residual stream is now mixed — mostly corrupted but with clean info at position 7.' },
+  { id: 'l1_attn', label: 'Layer 1: attention reads from the mixed residual stream and writes back. The clean information from position 7 can now influence other positions through attention.' },
+  { id: 'l1_mlp', label: 'Layer 1 MLP processes the mixed state and writes back.' },
+  { id: 'l2_attn', label: 'Layer 2: attention processes the mixed state. Later attention layers can move the clean information to where it\'s needed.' },
+  { id: 'l2_mlp', label: 'Layer 2 MLP processes the mixed state.' },
+  { id: 'logits', label: 'The mixed residual stream reaches the unembedding. The clean info from MLP 0 at position 7 was enough to shift the prediction toward "Paris".' },
+  { id: 'logit_diff', label: 'We measure the logit diff: Paris logit minus Rome logit. Positive = model prefers Paris, negative = prefers Rome. The fully corrupted run gives -1.07 (prefers Rome). The fully clean run gives +1.71 (prefers Paris).' },
+  { id: 'patching_metric', label: 'The patching metric normalizes this: (experiment diff - corrupted diff) / (clean diff - corrupted diff). A score of 0 = no effect (still Rome), 1 = fully restored (Paris). This experiment scored ~0.47 — partially restored toward Paris from just one patched position.' },
+];
+
+let currentStep = 0;
+let playing = false;
+let playInterval = null;
+
+// Speed: slider value 1-5 maps to 3000ms - 500ms
+const speedMs = [3000, 2000, 1500, 1000, 500];
+function getDelay() { return speedMs[document.getElementById('speed-slider').value - 1]; }
+function updateSpeed() {
+  const ms = getDelay();
+  document.getElementById('speed-label').textContent = (ms / 1000).toFixed(1) + 's';
+  if (playing) { stopPlay(); togglePlay(); } // restart with new speed
+}
+
+// Compute Y positions for each layer's components
+function getLayerPositions(layerIdx) {
+  const baseY = totalHeight - footerHeight;
+  let y = baseY;
+  // Skip past previous layers
+  for (let i = 0; i < layerIdx; i++) {
+    y -= layerHeight;
+  }
+  // This layer starts at y
+  const entryY = y;
+  const lnAttnY = y - gapResidToLN;
+  const attnInputY = lnAttnY - gapLNToInput - lnHeight/2;
+  const headsY = attnInputY - gapInputToComponent - headSize;
+  const attnAddY = headsY - gapComponentToAdd;
+
+  const mlpEntryY = attnAddY - gapAfterAdd;
+  const lnMlpY = mlpEntryY - gapResidToLN;
+  const mlpInputY = lnMlpY - gapLNToInput - lnHeight/2;
+  const mlpTopY = mlpInputY - gapInputToComponent - blockHeight;
+  const mlpAddY = mlpTopY - gapComponentToAdd;
+  const exitY = mlpAddY - gapAfterAdd;
+
+  return { entryY, lnAttnY, attnInputY, headsY, attnAddY, lnMlpY, mlpInputY, mlpTopY, mlpAddY, exitY };
+}
+
+function render(stepIdx) {
+  const svg = document.getElementById('diagram');
+  svg.setAttribute('height', totalHeight);
+  svg.setAttribute('viewBox', `0 0 ${W} ${totalHeight}`);
+
+  let s = '';
+
+  // Defs
+  s += `<defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="${textColor}" /></marker>
+    <marker id="ah-red" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="${C.corrupted}" /></marker>
+    <marker id="ah-green" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="${C.clean}" /></marker>
+    <marker id="ah-orange" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="${C.mixed}" /></marker>
+  </defs>`;
+
+  const sid = steps[stepIdx].id;
+
+  // ---- Helper: get activation state for a component ----
+  function compState(component) {
+    // Returns: null (not yet reached), 'corrupted', 'clean', 'mixed', 'patch_shown'
+    const order = ['start','embed','l0_attn_in','l0_attn_out','l0_mlp_in','l0_mlp_compute','l0_mlp_patch','l0_mlp_out','l1_attn','l1_mlp','l2_attn','l2_mlp','logits','logit_diff','patching_metric'];
+    const si = order.indexOf(sid);
+
+    switch(component) {
+      case 'embed': return si >= 1 ? 'corrupted' : null;
+      case 'resid_0': return si >= 1 ? 'corrupted' : null;
+      case 'l0_attn': return si >= 2 ? 'corrupted' : null;
+      case 'l0_attn_out': return si >= 3 ? 'corrupted' : null;
+      case 'resid_after_l0_attn': return si >= 3 ? 'corrupted' : null;
+      case 'l0_mlp': return si >= 4 ? (si >= 6 ? 'patch_shown' : 'corrupted') : null;
+      case 'l0_mlp_out': return si >= 7 ? 'clean' : null;
+      case 'resid_after_l0_mlp': return si >= 7 ? 'mixed' : null;
+      case 'l1_attn': return si >= 8 ? 'mixed' : null;
+      case 'l1_attn_out': return si >= 8 ? 'mixed' : null;
+      case 'resid_after_l1_attn': return si >= 8 ? 'mixed' : null;
+      case 'l1_mlp': return si >= 9 ? 'mixed' : null;
+      case 'l1_mlp_out': return si >= 9 ? 'mixed' : null;
+      case 'resid_after_l1_mlp': return si >= 9 ? 'mixed' : null;
+      case 'l2_attn': return si >= 10 ? 'mixed' : null;
+      case 'l2_attn_out': return si >= 10 ? 'mixed' : null;
+      case 'resid_after_l2_attn': return si >= 10 ? 'mixed' : null;
+      case 'l2_mlp': return si >= 11 ? 'mixed' : null;
+      case 'l2_mlp_out': return si >= 11 ? 'mixed' : null;
+      case 'resid_after_l2_mlp': return si >= 11 ? 'mixed' : null;
+      case 'logits': return si >= 12 ? 'mixed' : null;
+    }
+    return null;
+  }
+
+  function stateColor(st) {
+    if (st === 'corrupted') return C.corrupted;
+    if (st === 'clean') return C.clean;
+    if (st === 'mixed') return C.mixed;
+    return blockColor;
+  }
+  function stateBorder(st) {
+    if (st === 'corrupted') return C.corrupted_border;
+    if (st === 'clean') return C.clean_border;
+    if (st === 'mixed') return C.mixed_border;
+    return blockBorder;
+  }
+
+  // ---- BOTTOM: Tokens + Embed ----
+  const tokensY = totalHeight - 40;
+  const embedY = totalHeight - 95;
+
+  // Tokens label
+  s += `<text x="${residualX}" y="${tokensY + 4}" text-anchor="middle" style="font-size:14px; fill:#888;">tokens</text>`;
+  s += `<text x="${residualX}" y="${tokensY + 20}" text-anchor="middle" style="font-size:11px; fill:#aaa;">"The Colosseum is in"</text>`;
+
+  // Arrow from tokens to embed
+  s += `<line x1="${residualX}" y1="${tokensY - 8}" x2="${residualX}" y2="${embedY + blockHeight/2 + 2}" class="flow-arrow"/>`;
+
+  // Embed block
+  const embedSt = compState('embed');
+  const eFill = embedSt ? stateColor(embedSt) : blockColor;
+  const eBorder = embedSt ? stateBorder(embedSt) : blockBorder;
+  s += `<rect x="${residualX - blockWidth/2}" y="${embedY - blockHeight/2}" width="${blockWidth}" height="${blockHeight}"
+         rx="4" fill="${eFill}" stroke="${eBorder}" stroke-width="1.5"/>`;
+  s += `<text x="${residualX}" y="${embedY + 5}" text-anchor="middle" class="block-label">embed</text>`;
+
+  // ---- RESIDUAL STREAM (full dashed line) ----
+  const residTop = topPadding - 20;
+  s += `<line x1="${residualX}" y1="${embedY - blockHeight/2}" x2="${residualX}" y2="${residTop}" class="residual-stream"/>`;
+
+  // ---- LAYERS ----
+  for (let li = 0; li < numLayers; li++) {
+    const pos = getLayerPositions(li);
+    const prefix = `l${li}`;
+
+    // Layer box
+    const boxTop = pos.mlpAddY - 10;
+    const boxBot = pos.entryY + 5;
+    s += `<rect x="65" y="${boxTop}" width="${residualX - 30}" height="${boxBot - boxTop}"
+           rx="5" fill="none" stroke="#ddd" stroke-width="1" stroke-dasharray="4,3"/>`;
+    s += `<text x="75" y="${boxTop + 14}" style="font-size:11px; fill:#aaa;">Layer ${li}</text>`;
+
+    // === ATTENTION SECTION ===
+    const attnSt = compState(`${prefix}_attn`);
+    const attnOutSt = compState(`${prefix}_attn_out`);
+
+    // Arrow from residual to LN
+    s += `<line x1="${residualX}" y1="${pos.lnAttnY}" x2="${lnX + lnWidth/2 + 2}" y2="${pos.lnAttnY}" class="flow-arrow"/>`;
+
+    // LN block
+    const lnFill = attnSt ? stateColor(attnSt) : blockColor;
+    const lnBord = attnSt ? stateBorder(attnSt) : blockBorder;
+    s += `<rect x="${lnX - lnWidth/2}" y="${pos.lnAttnY - lnHeight/2}" width="${lnWidth}" height="${lnHeight}"
+           rx="3" fill="${lnFill}" stroke="${lnBord}" stroke-width="1"/>`;
+    s += `<text x="${lnX}" y="${pos.lnAttnY + 4}" text-anchor="middle" class="ln-label">LN</text>`;
+
+    // Lines from LN to attention block
+    const attnBlockX = blockCenterX;
+    s += `<line x1="${lnX}" y1="${pos.lnAttnY - lnHeight/2}" x2="${lnX}" y2="${pos.attnInputY}" class="flow-line"/>`;
+    s += `<line x1="${lnX}" y1="${pos.attnInputY}" x2="${attnBlockX}" y2="${pos.attnInputY}" class="flow-line"/>`;
+    s += `<line x1="${attnBlockX}" y1="${pos.attnInputY}" x2="${attnBlockX}" y2="${pos.headsY + headSize + 2}" class="flow-arrow"/>`;
+
+    // Attention block
+    const aFill = attnSt ? stateColor(attnSt) : blockColor;
+    const aBord = attnSt ? stateBorder(attnSt) : blockBorder;
+    s += `<rect x="${attnBlockX - blockWidth/2}" y="${pos.headsY}" width="${blockWidth}" height="${headSize}"
+           rx="4" fill="${aFill}" stroke="${aBord}" stroke-width="1.5"/>`;
+    s += `<text x="${attnBlockX}" y="${pos.headsY + headSize/2 + 5}" text-anchor="middle" class="block-label">attention</text>`;
+
+    // Output line from attention to + circle
+    const attnOutColor = attnOutSt ? stateColor(attnOutSt) : '#4A4A4A';
+    s += `<line x1="${attnBlockX}" y1="${pos.headsY}" x2="${attnBlockX}" y2="${pos.attnAddY}" stroke="${attnOutSt ? attnOutColor : '#4A4A4A'}" stroke-width="${attnOutSt ? 2.5 : 1.5}"/>`;
+    s += `<line x1="${attnBlockX}" y1="${pos.attnAddY}" x2="${residualX - addCircleRadius}" y2="${pos.attnAddY}" stroke="${attnOutSt ? attnOutColor : '#4A4A4A'}" stroke-width="${attnOutSt ? 2.5 : 1.5}"/>`;
+
+    // + circle for attention
+    s += `<circle cx="${residualX}" cy="${pos.attnAddY}" r="${addCircleRadius}" fill="white" stroke="#ccc" stroke-width="1.5"/>`;
+    s += `<text x="${residualX}" y="${pos.attnAddY}" class="add-symbol">+</text>`;
+
+    // === MLP SECTION ===
+    const mlpSt = compState(`${prefix}_mlp`);
+    const mlpOutSt = compState(`${prefix}_mlp_out`);
+
+    // Arrow from residual to LN
+    s += `<line x1="${residualX}" y1="${pos.lnMlpY}" x2="${lnX + lnWidth/2 + 2}" y2="${pos.lnMlpY}" class="flow-arrow"/>`;
+
+    // LN block
+    const lnMlpFill = mlpSt ? stateColor(mlpSt === 'patch_shown' ? 'corrupted' : mlpSt) : blockColor;
+    const lnMlpBord = mlpSt ? stateBorder(mlpSt === 'patch_shown' ? 'corrupted' : mlpSt) : blockBorder;
+    s += `<rect x="${lnX - lnWidth/2}" y="${pos.lnMlpY - lnHeight/2}" width="${lnWidth}" height="${lnHeight}"
+           rx="3" fill="${lnMlpFill}" stroke="${lnMlpBord}" stroke-width="1"/>`;
+    s += `<text x="${lnX}" y="${pos.lnMlpY + 4}" text-anchor="middle" class="ln-label">LN</text>`;
+
+    // Lines from LN to MLP
+    s += `<line x1="${lnX}" y1="${pos.lnMlpY - lnHeight/2}" x2="${lnX}" y2="${pos.mlpInputY}" class="flow-line"/>`;
+    s += `<line x1="${lnX}" y1="${pos.mlpInputY}" x2="${attnBlockX}" y2="${pos.mlpInputY}" class="flow-line"/>`;
+    s += `<line x1="${attnBlockX}" y1="${pos.mlpInputY}" x2="${attnBlockX}" y2="${pos.mlpTopY + blockHeight + 2}" class="flow-arrow"/>`;
+
+    // MLP block
+    let mFill, mBord;
+    if (mlpSt === 'patch_shown') {
+      mFill = blockColor; mBord = blockBorder; // we'll draw the position grid instead
+    } else {
+      mFill = mlpSt ? stateColor(mlpSt) : blockColor;
+      mBord = mlpSt ? stateBorder(mlpSt) : blockBorder;
+    }
+    s += `<rect x="${attnBlockX - blockWidth/2}" y="${pos.mlpTopY}" width="${blockWidth}" height="${blockHeight}"
+           rx="4" fill="${mFill}" stroke="${mBord}" stroke-width="1.5"/>`;
+
+    // Show token position grid inside MLP for layer 0 when patching
+    if (li === 0 && mlpSt === 'patch_shown') {
+      const cellW = (blockWidth - 16) / seqLen;
+      const cellH = blockHeight - 12;
+      const gridX = attnBlockX - blockWidth/2 + 8;
+      const gridY = pos.mlpTopY + 6;
+      for (let t = 0; t < seqLen; t++) {
+        const isPatched = (t === patchPos);
+        const cFill = isPatched ? C.clean : C.corrupted;
+        const cBord = isPatched ? C.clean_border : C.corrupted_border;
+        s += `<rect x="${gridX + t * cellW}" y="${gridY}" width="${cellW - 2}" height="${cellH}"
+               rx="2" fill="${cFill}" stroke="${cBord}" stroke-width="0.8"/>`;
+        // Token label
+        const label = t === patchPos ? 'in' : (t === 0 ? 'eos' : tokens[t].trim().substring(0,3));
+        s += `<text x="${gridX + t * cellW + cellW/2 - 1}" y="${gridY + cellH/2 + 3}"
+               text-anchor="middle" style="font-size:7px; fill:white; font-weight:bold;">${label}</text>`;
+      }
+      s += `<text x="${attnBlockX}" y="${pos.mlpTopY - 5}" text-anchor="middle"
+             style="font-size:10px; fill:${C.clean_border}; font-weight:bold;">position 7 patched with clean</text>`;
+    } else {
+      s += `<text x="${attnBlockX}" y="${pos.mlpTopY + blockHeight/2 + 5}" text-anchor="middle" class="block-label">MLP</text>`;
+    }
+
+    // Output line from MLP to + circle
+    const mlpOutColor = mlpOutSt ? stateColor(mlpOutSt) : '#4A4A4A';
+    s += `<line x1="${attnBlockX}" y1="${pos.mlpTopY}" x2="${attnBlockX}" y2="${pos.mlpAddY}"
+           stroke="${mlpOutSt ? mlpOutColor : '#4A4A4A'}" stroke-width="${mlpOutSt ? 2.5 : 1.5}"/>`;
+    s += `<line x1="${attnBlockX}" y1="${pos.mlpAddY}" x2="${residualX - addCircleRadius}" y2="${pos.mlpAddY}"
+           stroke="${mlpOutSt ? mlpOutColor : '#4A4A4A'}" stroke-width="${mlpOutSt ? 2.5 : 1.5}"/>`;
+
+    // + circle for MLP
+    s += `<circle cx="${residualX}" cy="${pos.mlpAddY}" r="${addCircleRadius}" fill="white" stroke="#ccc" stroke-width="1.5"/>`;
+    s += `<text x="${residualX}" y="${pos.mlpAddY}" class="add-symbol">+</text>`;
+
+    // === RESIDUAL STREAM HIGHLIGHTS ===
+    // Before attention (from embed or previous layer's exit)
+    const beforeAttnSt = li === 0 ? compState('resid_0') : compState(`resid_after_l${li-1}_mlp`);
+    if (beforeAttnSt) {
+      const fromY = li === 0 ? embedY - blockHeight/2 : getLayerPositions(li-1).mlpAddY - addCircleRadius;
+      s += `<line x1="${residualX}" y1="${fromY}" x2="${residualX}" y2="${pos.attnAddY + addCircleRadius}"
+             stroke="${stateColor(beforeAttnSt)}" class="resid-highlight"/>`;
+    }
+
+    // Between attention and MLP
+    const afterAttnSt = compState(`resid_after_${prefix}_attn`);
+    if (afterAttnSt) {
+      s += `<line x1="${residualX}" y1="${pos.attnAddY - addCircleRadius}" x2="${residualX}" y2="${pos.mlpAddY + addCircleRadius}"
+             stroke="${stateColor(afterAttnSt)}" class="resid-highlight"/>`;
+    }
+
+    // After MLP (to next layer or logits)
+    const afterMlpSt = compState(`resid_after_${prefix}_mlp`);
+    if (afterMlpSt) {
+      const toY = li < numLayers - 1 ? getLayerPositions(li+1).attnAddY + addCircleRadius : residTop + 30;
+      s += `<line x1="${residualX}" y1="${pos.mlpAddY - addCircleRadius}" x2="${residualX}" y2="${toY}"
+             stroke="${stateColor(afterMlpSt)}" class="resid-highlight"/>`;
+    }
+  }
+
+  // ---- TOP: Logits ----
+  const logitsY = residTop + 10;
+  const logSt = compState('logits');
+  const lFill = logSt ? stateColor(logSt) : '#E0E0E0';
+  const lBord = logSt ? stateBorder(logSt) : '#B0B0B0';
+  s += `<rect x="${residualX - blockWidth/2}" y="${logitsY - blockHeight/2}" width="${blockWidth}" height="${blockHeight}"
+         rx="4" fill="${lFill}" stroke="${lBord}" stroke-width="1.5"/>`;
+  s += `<text x="${residualX}" y="${logitsY + 5}" text-anchor="middle" class="block-label">logits</text>`;
+
+  if (logSt) {
+    s += `<text x="${residualX}" y="${logitsY - blockHeight/2 - 10}" text-anchor="middle"
+           style="font-size:12px; fill:${C.mixed_border}; font-weight:bold;">Prediction shifts toward "Paris"</text>`;
+  }
+
+  // Logit diff / patching metric visual (shown to the left of logits)
+  if (sid === 'logit_diff' || sid === 'patching_metric') {
+    const infoX = 30;
+    const infoY = logitsY - 55;
+
+    // Logit diff explanation
+    s += `<rect x="${infoX}" y="${infoY}" width="260" height="${sid === 'patching_metric' ? 110 : 60}" rx="5" fill="#f9f9f9" stroke="#ddd" stroke-width="1"/>`;
+    s += `<text x="${infoX + 10}" y="${infoY + 18}" style="font-size:12px; fill:${textColor}; font-weight:bold;">Logit Diff = Paris logit − Rome logit</text>`;
+    s += `<text x="${infoX + 10}" y="${infoY + 34}" style="font-size:11px; fill:#888;">Corrupted run: −1.07 (prefers Rome)</text>`;
+    s += `<text x="${infoX + 10}" y="${infoY + 48}" style="font-size:11px; fill:#888;">Clean run: +1.71 (prefers Paris)</text>`;
+
+    if (sid === 'patching_metric') {
+      s += `<line x1="${infoX + 10}" y1="${infoY + 58}" x2="${infoX + 250}" y2="${infoY + 58}" stroke="#ddd" stroke-width="1"/>`;
+      s += `<text x="${infoX + 10}" y="${infoY + 74}" style="font-size:12px; fill:${textColor}; font-weight:bold;">Patching Metric (normalized):</text>`;
+      s += `<text x="${infoX + 10}" y="${infoY + 90}" style="font-size:11px; fill:#888;">(exp diff − corrupted diff) / (clean diff − corrupted diff)</text>`;
+      s += `<text x="${infoX + 10}" y="${infoY + 106}" style="font-size:11px; fill:${C.mixed_border}; font-weight:bold;">This experiment: ~0.47 (partial recovery)</text>`;
+    }
+  }
+
+  // Title
+  s += `<text x="${W/2}" y="20" text-anchor="middle" style="font-size:16px; font-weight:bold; fill:${textColor};">Activation Patching: Step-by-Step</text>`;
+  s += `<text x="${W/2}" y="38" text-anchor="middle" style="font-size:12px; fill:#888;">Patching clean MLP Layer 0 output (position 7 only) into corrupted run</text>`;
+
+  svg.innerHTML = s;
+  document.getElementById('step-label').textContent = `Step ${stepIdx + 1}/${steps.length}: ${steps[stepIdx].label}`;
+}
+
+function nextStep() { if (currentStep < steps.length - 1) { currentStep++; render(currentStep); } }
+function prevStep() { if (currentStep > 0) { currentStep--; render(currentStep); } }
+function resetAnim() { currentStep = 0; stopPlay(); render(0); }
+function togglePlay() {
+  if (playing) { stopPlay(); return; }
+  playing = true;
+  document.getElementById('btn-play').textContent = 'Pause';
+  document.getElementById('btn-play').classList.add('active');
+  playInterval = setInterval(() => {
+    if (currentStep < steps.length - 1) { currentStep++; render(currentStep); }
+    else stopPlay();
+  }, getDelay());
+}
+function stopPlay() {
+  playing = false;
+  if (playInterval) clearInterval(playInterval);
+  document.getElementById('btn-play').textContent = 'Play';
+  document.getElementById('btn-play').classList.remove('active');
+}
+
+render(0);
+</script>
+</body>
+</html>
